@@ -1,3 +1,5 @@
+import secrets
+import string
 import uuid
 from datetime import datetime, timezone
 
@@ -9,6 +11,17 @@ from .database import Base
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+# Avoid visually-ambiguous characters on a small touchscreen font: no 0/O,
+# 1/I/L.
+_PAIRING_CODE_ALPHABET = "".join(
+    c for c in string.ascii_uppercase + string.digits if c not in "0O1IL"
+)
+
+
+def generate_pairing_code(length: int = 6) -> str:
+    return "".join(secrets.choice(_PAIRING_CODE_ALPHABET) for _ in range(length))
 
 
 class Customer(Base):
@@ -47,3 +60,24 @@ class Device(Base):
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     customer = relationship("Customer", back_populates="devices")
+
+
+class PendingClaim(Base):
+    """A short-lived pairing code an unprovisioned device generates and
+    displays on its own screen. Kyle claims it from his computer (picking
+    which customer it belongs to) instead of typing device_id/secret by
+    hand on the touchscreen - the device then picks up its real credentials
+    by polling. See /api/v1/pairing/* in main.py."""
+
+    __tablename__ = "pending_claims"
+
+    code = Column(String, primary_key=True, default=generate_pairing_code)
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+    claimed = Column(Boolean, nullable=False, default=False)
+
+    # Filled in at claim time; device_id/secret are handed to the polling
+    # device once and then secret is cleared (set back to None) so it isn't
+    # sitting in the DB in plaintext any longer than it takes the device to
+    # fetch it.
+    device_id = Column(String, nullable=True)
+    secret = Column(String, nullable=True)

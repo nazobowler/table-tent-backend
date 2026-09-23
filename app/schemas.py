@@ -67,3 +67,19 @@ class DeviceOut(BaseModel):
 
 class DeviceListOut(BaseModel):
     devices: List[DeviceOut]
+
+
+class PairingRequestOut(BaseModel):
+    code: str
+    expires_in_seconds: int
+
+
+class PairingStatusOut(BaseModel):
+    claimed: bool
+    device_id: Optional[str] = None
+    secret: Optional[str] = None  # only present on the first status check after claiming
+
+
+class PairingClaimIn(BaseModel):
+    customer_id: int
+    name: str

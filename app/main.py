@@ -21,6 +21,11 @@ Base.metadata.create_all(bind=engine)
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_placeholder")
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "sk_placeholder")
 
+# How long an unclaimed pairing code stays valid. Short on purpose - it's
+# only alive for the few minutes between a device booting unprovisioned and
+# Kyle claiming it from his computer.
+PAIRING_CODE_TTL_MINUTES = 15
+
 app = FastAPI(title="Table Tent Subscription Backend", version="1.0.0")
 
 
@@ -77,6 +82,55 @@ def checkin(
         grace_expires_at=eff.grace_expires_at,
         server_time=now,
     )
+
+
+# =============================================================================
+# Device pairing - lets an unprovisioned device get its device_id/secret by
+# displaying a short code and polling, instead of Kyle typing a 12-char id
+# and a 32-char secret in on a touchscreen keyboard. The device-facing
+# endpoints below are deliberately unauthenticated (there's nothing to
+# authenticate yet - that's the whole point), but the code itself is short-
+# lived and single-use, and claiming one still requires the admin key.
+# =============================================================================
+
+@app.post("/api/v1/pairing/request", response_model=schemas.PairingRequestOut)
+def pairing_request(db: Session = Depends(get_db)):
+    # Collision odds are astronomically low (6 chars from a 31-char
+    # alphabet), but guard against it anyway rather than trust it blindly.
+    for _ in range(5):
+        code = models.generate_pairing_code()
+        if not db.query(models.PendingClaim).filter(models.PendingClaim.code == code).first():
+            break
+    else:
+        raise HTTPException(status_code=500, detail="Could not generate a unique pairing code")
+
+    claim = models.PendingClaim(code=code)
+    db.add(claim)
+    db.commit()
+
+    logger.info("Pairing: code %s requested", code)
+    return schemas.PairingRequestOut(code=code, expires_in_seconds=PAIRING_CODE_TTL_MINUTES * 60)
+
+
+@app.get("/api/v1/pairing/{code}/status", response_model=schemas.PairingStatusOut)
+def pairing_status(code: str, db: Session = Depends(get_db)):
+    claim = db.query(models.PendingClaim).filter(models.PendingClaim.code == code).first()
+    if not claim:
+        raise HTTPException(status_code=404, detail="Unknown or expired pairing code")
+
+    if not claim.claimed:
+        return schemas.PairingStatusOut(claimed=False)
+
+    # Hand the secret over exactly once - the first status check after
+    # claiming gets it, then it's wiped from the DB so it isn't sitting
+    # around in plaintext any longer than necessary.
+    secret_to_return = claim.secret
+    if claim.secret is not None:
+        claim.secret = None
+        db.add(claim)
+        db.commit()
+
+    return schemas.PairingStatusOut(claimed=True, device_id=claim.device_id, secret=secret_to_return)
 
 
 # =============================================================================
@@ -165,6 +219,11 @@ def create_customer(body: schemas.CustomerCreate, db: Session = Depends(get_db))
     return customer
 
 
+@app.get("/api/v1/admin/customers", response_model=List[schemas.CustomerOut], dependencies=[Depends(require_admin)])
+def list_customers(db: Session = Depends(get_db)):
+    return db.query(models.Customer).all()
+
+
 @app.post("/api/v1/admin/devices", response_model=schemas.DeviceCreateOut, dependencies=[Depends(require_admin)])
 def create_device(body: schemas.DeviceCreate, db: Session = Depends(get_db)):
     customer = db.query(models.Customer).filter(models.Customer.id == body.customer_id).first()
@@ -183,6 +242,65 @@ def create_device(body: schemas.DeviceCreate, db: Session = Depends(get_db)):
 
     # The plaintext secret is only ever available in this one response -
     # only the hash is stored. Enter it into the device once during setup.
+    return schemas.DeviceCreateOut(device_id=device.id, secret=secret)
+
+
+@app.get(
+    "/api/v1/admin/pairing/pending",
+    response_model=List[str],
+    dependencies=[Depends(require_admin)],
+)
+def list_pending_pairing_codes(db: Session = Depends(get_db)):
+    """Unclaimed, unexpired codes currently being displayed by some device -
+    handy if you've got more than one unit waiting to be set up at once."""
+    cutoff = now_utc() - timedelta(minutes=PAIRING_CODE_TTL_MINUTES)
+    claims = (
+        db.query(models.PendingClaim)
+        .filter(models.PendingClaim.claimed.is_(False))
+        .filter(models.PendingClaim.created_at >= cutoff)
+        .order_by(models.PendingClaim.created_at.desc())
+        .all()
+    )
+    return [c.code for c in claims]
+
+
+@app.post(
+    "/api/v1/admin/pairing/{code}/claim",
+    response_model=schemas.DeviceCreateOut,
+    dependencies=[Depends(require_admin)],
+)
+def claim_pairing_code(code: str, body: schemas.PairingClaimIn, db: Session = Depends(get_db)):
+    claim = db.query(models.PendingClaim).filter(models.PendingClaim.code == code).first()
+    if not claim:
+        raise HTTPException(status_code=404, detail="Unknown pairing code")
+    if claim.claimed:
+        raise HTTPException(status_code=409, detail="Pairing code already claimed")
+
+    cutoff = now_utc() - timedelta(minutes=PAIRING_CODE_TTL_MINUTES)
+    if claim.created_at is not None and claim.created_at < cutoff:
+        raise HTTPException(status_code=410, detail="Pairing code expired - reboot the device for a new one")
+
+    customer = db.query(models.Customer).filter(models.Customer.id == body.customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    secret = secrets.token_urlsafe(24)
+    device = models.Device(
+        customer_id=customer.id,
+        name=body.name,
+        secret_hash=hash_secret(secret),
+    )
+    db.add(device)
+
+    claim.claimed = True
+    claim.device_id = device.id
+    claim.secret = secret  # cleared once the device fetches it via /pairing/{code}/status
+    db.add(claim)
+
+    db.commit()
+    db.refresh(device)
+
+    logger.info("Pairing: code %s claimed -> device=%s customer=%s", code, device.id, customer.id)
     return schemas.DeviceCreateOut(device_id=device.id, secret=secret)
 
 
