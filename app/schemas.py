@@ -77,7 +77,7 @@ class PairingRequestOut(BaseModel):
 class PairingStatusOut(BaseModel):
     claimed: bool
     device_id: Optional[str] = None
-    secret: Optional[str] = None  # only present on the first status check after claiming
+    secret: Optional[str] = None  # present once claim.claimed is true
 
 
 class PairingClaimIn(BaseModel):

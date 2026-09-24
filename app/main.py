@@ -121,16 +121,15 @@ def pairing_status(code: str, db: Session = Depends(get_db)):
     if not claim.claimed:
         return schemas.PairingStatusOut(claimed=False)
 
-    # Hand the secret over exactly once - the first status check after
-    # claiming gets it, then it's wiped from the DB so it isn't sitting
-    # around in plaintext any longer than necessary.
-    secret_to_return = claim.secret
-    if claim.secret is not None:
-        claim.secret = None
-        db.add(claim)
-        db.commit()
-
-    return schemas.PairingStatusOut(claimed=True, device_id=claim.device_id, secret=secret_to_return)
+    # Returned every time the claim is polled, not just once - an earlier
+    # version wiped the secret from the DB after the first read, on the
+    # theory that only the device itself would ever check. In practice
+    # anything hitting this URL once (a stray manual check, a browser tab
+    # left open, etc.) could shut the device out by consuming it first.
+    # Codes are short-lived (PAIRING_CODE_TTL_MINUTES) and claiming one
+    # already requires the admin key, so repeat-readability here isn't a
+    # meaningful new exposure.
+    return schemas.PairingStatusOut(claimed=True, device_id=claim.device_id, secret=claim.secret)
 
 
 # =============================================================================

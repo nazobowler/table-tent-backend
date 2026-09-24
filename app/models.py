@@ -75,9 +75,10 @@ class PendingClaim(Base):
     created_at = Column(DateTime(timezone=True), default=now_utc)
     claimed = Column(Boolean, nullable=False, default=False)
 
-    # Filled in at claim time; device_id/secret are handed to the polling
-    # device once and then secret is cleared (set back to None) so it isn't
-    # sitting in the DB in plaintext any longer than it takes the device to
-    # fetch it.
+    # Filled in at claim time; device_id/secret are returned to whatever
+    # polls GET /api/v1/pairing/{code}/status once claimed=true. Not wiped
+    # after the first read - codes are short-lived and claiming one already
+    # requires the admin key, so it's fine for the device to keep picking
+    # this up on retries.
     device_id = Column(String, nullable=True)
     secret = Column(String, nullable=True)
