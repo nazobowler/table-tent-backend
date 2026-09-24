@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from .auth import authenticate_device, hash_secret, require_admin
 from .database import Base, engine, get_db
-from .state import compute_effective_state
+from .state import compute_effective_state, _aware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("table-tent-backend")
@@ -276,7 +276,7 @@ def claim_pairing_code(code: str, body: schemas.PairingClaimIn, db: Session = De
         raise HTTPException(status_code=409, detail="Pairing code already claimed")
 
     cutoff = now_utc() - timedelta(minutes=PAIRING_CODE_TTL_MINUTES)
-    if claim.created_at is not None and claim.created_at < cutoff:
+    if _aware(claim.created_at) is not None and _aware(claim.created_at) < cutoff:
         raise HTTPException(status_code=410, detail="Pairing code expired - reboot the device for a new one")
 
     customer = db.query(models.Customer).filter(models.Customer.id == body.customer_id).first()
@@ -290,10 +290,19 @@ def claim_pairing_code(code: str, body: schemas.PairingClaimIn, db: Session = De
         secret_hash=hash_secret(secret),
     )
     db.add(device)
+    # device.id is populated by a Python-side default (see models.py), which
+    # only runs when this INSERT actually executes - flush here so device.id
+    # is a real value below, instead of the None it would otherwise still be
+    # at this point. Without this, claim.device_id was silently saved as
+    # null every time (the DeviceCreateOut returned below was still correct,
+    # since it reads device.id after the commit further down - only the
+    # claim row itself was affected, which is what /pairing/{code}/status
+    # hands back to the polling device).
+    db.flush()
 
     claim.claimed = True
     claim.device_id = device.id
-    claim.secret = secret  # cleared once the device fetches it via /pairing/{code}/status
+    claim.secret = secret
     db.add(claim)
 
     db.commit()
