@@ -6,9 +6,11 @@ from typing import List
 
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from . import models, schemas
+from .admin_dashboard import ADMIN_DASHBOARD_HTML
 from .auth import authenticate_device, hash_secret, require_admin
 from .database import Base, engine, get_db
 from .state import compute_effective_state, _aware
@@ -36,6 +38,21 @@ def now_utc():
 @app.get("/")
 def root():
     return {"status": "ok", "service": "table-tent-backend"}
+
+
+# =============================================================================
+# Admin dashboard - a single self-contained HTML/JS page (no build step, no
+# extra dependencies) served at /admin. It's a thin UI over the existing
+# admin API below: it asks for the same X-Admin-Key you've been passing to
+# curl, stores it in the browser's localStorage, and calls the same
+# endpoints. No new backend logic, no new auth model - just a real screen
+# instead of curl commands. Markup/JS lives in admin_dashboard.py, not here,
+# so this file stays about the API.
+# =============================================================================
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard():
+    return ADMIN_DASHBOARD_HTML
 
 
 # =============================================================================
