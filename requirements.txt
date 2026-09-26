@@ -1,6 +1,13 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
-sqlalchemy>=2.0
+# Capped below 2.1 on purpose: SQLAlchemy 2.1 changed the default Postgres
+# driver for a bare "postgresql://" URL from psycopg2 to psycopg (v3),
+# which isn't installed here - an unbounded >=2.0 pin let a routine deploy
+# pick up 2.1 and crash the container outright (ModuleNotFoundError: No
+# module named 'psycopg'). app/database.py now also pins the driver
+# explicitly in the URL itself as a second layer of defense, but keep this
+# cap too rather than relying on that alone.
+sqlalchemy>=2.0,<2.1
 psycopg2-binary>=2.9
 pydantic>=2.0
 stripe>=9.0
