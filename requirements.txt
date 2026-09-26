@@ -12,3 +12,13 @@ psycopg2-binary>=2.9
 pydantic>=2.0
 stripe>=9.0
 python-dotenv>=1.0
+# Needed for the firmware upload endpoint (Form/UploadFile params) - FastAPI
+# only raises this at request-route-registration time (i.e. app startup),
+# not at import time in a way a normal test run catches, if the interpreter
+# already happens to have it installed some other way. It was present in
+# the dev sandbox here but was never actually pinned in this file - Railway
+# builds a clean environment from just this file, so it crash-looped on
+# boot the moment this endpoint was registered. Same class of gap as the
+# SQLAlchemy driver outage: an implicit dependency that worked locally by
+# accident.
+python-multipart>=0.0.9
