@@ -140,6 +140,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
     <div class="add-customer-row">
       <input id="newFirmwareVersion" type="text" placeholder="Version (e.g. 1.1.0)" style="max-width:180px;">
       <input id="newFirmwareFile" type="file" accept=".bin">
+      <input id="newFirmwareNotes" type="text" placeholder="Notes (optional - what changed)" style="flex:1;">
       <button class="primary" id="uploadFirmwareBtn">Upload</button>
     </div>
     <div class="muted-note">Uploading a build doesn't push it anywhere by itself - use Push (per device, in the Devices table) or Push to all below once it's here.</div>
@@ -586,10 +587,11 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       wrap.innerHTML = '<div class="empty">No firmware builds uploaded yet.</div>';
       return;
     }
-    var html = '<table><thead><tr><th>Version</th><th>Size</th><th>Uploaded</th><th></th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>Version</th><th>Notes</th><th>Size</th><th>Uploaded</th><th></th></tr></thead><tbody>';
     state.firmware.forEach(function (b) {
       html += '<tr>' +
         '<td>' + escapeHtml(b.version) + '</td>' +
+        '<td class="dim">' + (b.notes ? escapeHtml(b.notes) : '—') + '</td>' +
         '<td class="dim">' + (b.size_bytes / 1024).toFixed(0) + ' KB</td>' +
         '<td class="dim">' + fmtRelative(b.uploaded_at) + '</td>' +
         '<td><div class="row-actions">' +
@@ -807,6 +809,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
   document.getElementById("uploadFirmwareBtn").addEventListener("click", function () {
     var versionInput = document.getElementById("newFirmwareVersion");
     var fileInput = document.getElementById("newFirmwareFile");
+    var notesInput = document.getElementById("newFirmwareNotes");
     var version = versionInput.value.trim();
     var file = fileInput.files && fileInput.files[0];
     if (!version) { showBanner("error", "Enter a version string (e.g. 1.1.0)."); return; }
@@ -814,12 +817,14 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
     var formData = new FormData();
     formData.append("version", version);
     formData.append("file", file);
+    formData.append("notes", notesInput.value.trim());
     var btn = document.getElementById("uploadFirmwareBtn");
     btn.disabled = true;
     apiUpload("/api/v1/admin/firmware/upload", formData)
       .then(function (result) {
         versionInput.value = "";
         fileInput.value = "";
+        notesInput.value = "";
         showBanner("success", "Uploaded firmware <strong>" + escapeHtml(result.version) + "</strong> (" + (result.size_bytes / 1024).toFixed(0) + " KB).");
         return loadAll();
       })

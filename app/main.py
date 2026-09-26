@@ -51,7 +51,29 @@ def _ensure_device_columns():
             conn.execute(text(stmt))
 
 
+def _ensure_firmware_columns():
+    """Same reasoning as _ensure_device_columns() above, for firmware_builds -
+    it went from a brand-new table to one with real uploaded builds in it
+    the moment the OTA feature actually got used, so a column added after
+    that point needs the same ALTER TABLE treatment rather than relying on
+    create_all()."""
+    inspector = inspect(engine)
+    if "firmware_builds" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("firmware_builds")}
+    statements = []
+    if "notes" not in existing:
+        statements.append("ALTER TABLE firmware_builds ADD COLUMN notes TEXT")
+    if not statements:
+        return
+    with engine.begin() as conn:
+        for stmt in statements:
+            logger.info("Startup migration: %s", stmt)
+            conn.execute(text(stmt))
+
+
 _ensure_device_columns()
+_ensure_firmware_columns()
 Base.metadata.create_all(bind=engine)
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_placeholder")
@@ -579,6 +601,7 @@ def force_reactivate(device_id: str, db: Session = Depends(get_db)):
 async def upload_firmware(
     version: str = Form(...),
     file: UploadFile = File(...),
+    notes: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Stores a compiled .bin in Postgres (see FirmwareBuild - Railway's own
@@ -586,21 +609,28 @@ async def upload_firmware(
     same version string overwrites the existing row - handy while iterating
     on a build before it's ready to push anywhere, but be careful not to
     reuse a version string that's already been pushed to a device unless
-    you actually mean to change what that device fetches next."""
+    you actually mean to change what that device fetches next. notes is
+    free text for Kyle's own reference on the dashboard (what changed in
+    this build) - purely informational, never sent to or read by a device.
+    Re-uploading a version replaces its notes too, same as everything else
+    about that build - leave the field blank on a re-upload to clear it
+    rather than leaving stale notes from an earlier attempt in place."""
     version = version.strip()
     if not version:
         raise HTTPException(status_code=422, detail="Version can't be blank")
     data = await file.read()
     if not data:
         raise HTTPException(status_code=422, detail="Uploaded file is empty")
+    notes = notes.strip() or None
 
     build = db.query(models.FirmwareBuild).filter(models.FirmwareBuild.version == version).first()
     if build:
         build.data = data
         build.size_bytes = len(data)
+        build.notes = notes
         build.uploaded_at = now_utc()
     else:
-        build = models.FirmwareBuild(version=version, data=data, size_bytes=len(data))
+        build = models.FirmwareBuild(version=version, data=data, size_bytes=len(data), notes=notes)
     db.add(build)
     db.commit()
     db.refresh(build)

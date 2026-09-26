@@ -128,4 +128,8 @@ class FirmwareBuild(Base):
     version = Column(String, primary_key=True)
     size_bytes = Column(Integer, nullable=False)
     data = Column(LargeBinary, nullable=False)
+    # Free-text release notes Kyle types in at upload time (e.g. "fixes the
+    # blank device-name bug", "first OTA-capable build") - purely for his own
+    # reference on the dashboard, never sent to or read by a device.
+    notes = Column(String, nullable=True)
     uploaded_at = Column(DateTime(timezone=True), default=now_utc)

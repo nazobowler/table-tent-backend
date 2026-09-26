@@ -109,6 +109,7 @@ class DeviceListOut(BaseModel):
 class FirmwareBuildOut(BaseModel):
     version: str
     size_bytes: int
+    notes: Optional[str] = None
     uploaded_at: datetime
 
     class Config:
