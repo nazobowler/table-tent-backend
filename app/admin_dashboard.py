@@ -147,7 +147,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
 <script>
 (function () {
   var STORAGE_KEY = "tt_admin_key";
-  var state = { devices: [], customers: [], pending: [], expandedLogs: {}, logCache: {} };
+  var state = { devices: [], customers: [], pending: [], expandedLogs: {}, logCache: {}, confirmDelete: {} };
   var refreshTimer = null;
 
   function getKey() {
@@ -311,13 +311,19 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
         '<td class="dim">' + (d.wifi_rssi_dbm != null ? d.wifi_rssi_dbm + " dBm" : "—") + '</td>' +
         '<td class="dim">' + (d.grace_expires_at ? fmtRelative(d.grace_expires_at) : "—") + '</td>' +
         '<td><div class="row-actions">' +
-          '<button data-action="' + (d.manually_suspended ? "reactivate" : "suspend") + '" data-device="' + escapeHtml(d.device_id) + '">' +
-            (d.manually_suspended ? "Reactivate" : "Suspend") +
-          '</button>' +
-          '<button data-action="reset-grace" data-device="' + escapeHtml(d.device_id) + '">Reset grace</button>' +
-          '<button data-action="toggle-log" data-device="' + escapeHtml(d.device_id) + '">' +
-            (state.expandedLogs[d.device_id] ? "Hide log" : "Log") +
-          '</button>' +
+          (state.confirmDelete[d.device_id]
+            ? '<span class="dim" style="font-size:12px;">Delete forever?</span>' +
+              '<button class="danger" data-action="confirm-delete" data-device="' + escapeHtml(d.device_id) + '">Yes, delete</button>' +
+              '<button data-action="cancel-delete" data-device="' + escapeHtml(d.device_id) + '">Cancel</button>'
+            : '<button data-action="' + (d.manually_suspended ? "reactivate" : "suspend") + '" data-device="' + escapeHtml(d.device_id) + '">' +
+                (d.manually_suspended ? "Reactivate" : "Suspend") +
+              '</button>' +
+              '<button data-action="reset-grace" data-device="' + escapeHtml(d.device_id) + '">Reset grace</button>' +
+              '<button data-action="toggle-log" data-device="' + escapeHtml(d.device_id) + '">' +
+                (state.expandedLogs[d.device_id] ? "Hide log" : "Log") +
+              '</button>' +
+              '<button class="danger" data-action="delete" data-device="' + escapeHtml(d.device_id) + '">Delete</button>'
+          ) +
         '</div></td>' +
       '</tr>';
       if (state.expandedLogs[d.device_id]) {
@@ -372,6 +378,39 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
         var deviceId = btn.getAttribute("data-device");
         delete state.expandedLogs[deviceId];
         renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="delete"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        state.confirmDelete[deviceId] = true;
+        renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="cancel-delete"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        delete state.confirmDelete[deviceId];
+        renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="confirm-delete"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/devices/" + encodeURIComponent(deviceId), { method: "DELETE" })
+          .then(function (result) {
+            delete state.confirmDelete[deviceId];
+            delete state.expandedLogs[deviceId];
+            delete state.logCache[deviceId];
+            showBanner("success", "Deleted device <strong>" + escapeHtml(result.name) + "</strong> (" + escapeHtml(result.device_id) + ").");
+            return loadAll();
+          })
+          .catch(function (e) { showBanner("error", "Delete failed: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
       });
     });
   }

@@ -396,6 +396,31 @@ def list_devices(db: Session = Depends(get_db)):
     return [_device_to_out(d, db) for d in devices]
 
 
+@app.delete(
+    "/api/v1/admin/devices/{device_id}",
+    response_model=schemas.DeviceDeleteOut,
+    dependencies=[Depends(require_admin)],
+)
+def delete_device(device_id: str, db: Session = Depends(get_db)):
+    """Permanently removes a Device row - for cleaning up the orphaned rows
+    left behind by earlier pairing-bug attempts (see the status doc) and any
+    test/throwaway devices. There's no undo: the row, its secret hash, and
+    its check-in history (last_checkin_at, recent_log, etc.) are gone once
+    this runs. This does NOT touch the physical hardware - if a real device
+    still has this device_id/secret saved, it'll just start getting 401s on
+    its next check-in (same as any other unknown device) rather than
+    anything more dramatic. Doesn't cascade to anything else - Device has no
+    dependent rows in this schema (PendingClaim references a device_id but
+    doesn't have a real FK constraint on it, so a stale claim row pointing
+    at a deleted device is harmless clutter, not a delete-blocking error)."""
+    device = _get_device_or_404(device_id, db)
+    name = device.name
+    db.delete(device)
+    db.commit()
+    logger.info("Admin: deleted device=%s (name=%s)", device_id, name)
+    return schemas.DeviceDeleteOut(device_id=device_id, name=name)
+
+
 @app.get(
     "/api/v1/admin/devices/{device_id}/log",
     response_model=schemas.DeviceLogOut,

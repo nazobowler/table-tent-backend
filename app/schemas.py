@@ -78,6 +78,11 @@ class DeviceListOut(BaseModel):
     devices: List[DeviceOut]
 
 
+class DeviceDeleteOut(BaseModel):
+    device_id: str
+    name: str
+
+
 class DeviceLogOut(BaseModel):
     device_id: str
     log: Optional[str] = None
