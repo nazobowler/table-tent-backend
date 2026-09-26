@@ -35,6 +35,13 @@ class CheckinResponse(BaseModel):
     failure_code: Optional[int] = None
     grace_expires_at: Optional[datetime] = None
     server_time: datetime
+    # Echoes the device's current name back on every check-in, so the
+    # firmware can show it on the on-device "Device Name" settings page even
+    # when the customer has never renamed it there themselves - otherwise
+    # that page has no way to know whatever name an admin set at
+    # pairing/creation time (see CheckinRequest.name above) and would show
+    # blank instead of the real current name.
+    name: str
 
 
 class CustomerCreate(BaseModel):

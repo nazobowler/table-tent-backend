@@ -149,6 +149,7 @@ def checkin(
         failure_code=eff.failure_code,
         grace_expires_at=eff.grace_expires_at,
         server_time=now,
+        name=device.name,
     )
 
 
