@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 import stripe
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
@@ -41,6 +41,8 @@ def _ensure_device_columns():
         statements.append("ALTER TABLE devices ADD COLUMN device_locally_suspended BOOLEAN NOT NULL DEFAULT false")
     if "recent_log" not in existing:
         statements.append("ALTER TABLE devices ADD COLUMN recent_log TEXT")
+    if "target_firmware_version" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN target_firmware_version TEXT")
     if not statements:
         return
     with engine.begin() as conn:
@@ -144,12 +146,54 @@ def checkin(
     eff = compute_effective_state(device, customer, now)
     logger.info("Check-in: device=%s status=%s code=%s", device.id, eff.status, eff.failure_code)
 
+    # Computed fresh on every check-in rather than stored anywhere, same as
+    # eff.status above: an update is "pending" for exactly as long as
+    # target_firmware_version disagrees with what the device just told us
+    # its own firmware_version is. Once the device flashes it and reboots,
+    # its next check-in reports the matching version and this naturally
+    # goes back to false - no separate endpoint needed to mark a push done.
+    fw_update_available = bool(
+        device.target_firmware_version and device.target_firmware_version != device.firmware_version
+    )
+
     return schemas.CheckinResponse(
         subscription_status=eff.status,
         failure_code=eff.failure_code,
         grace_expires_at=eff.grace_expires_at,
         server_time=now,
         name=device.name,
+        firmware_update_available=fw_update_available,
+        firmware_update_version=device.target_firmware_version if fw_update_available else None,
+    )
+
+
+# =============================================================================
+# Firmware OTA - device downloads the binary the backend has flagged as
+# pending for it (see Device.target_firmware_version and checkin() above)
+# and flashes it via the ESP32's built-in A/B OTA partitions (the firmware's
+# applyFirmwareUpdate(), Update.h). Bearer-auth'd the same as check-in.
+# =============================================================================
+
+@app.get("/api/v1/devices/{device_id}/firmware/{version}")
+def download_firmware(
+    device_id: str,
+    version: str,
+    device: models.Device = Depends(authenticate_device),
+    db: Session = Depends(get_db),
+):
+    """Streams the raw firmware binary. Doesn't check the requested version
+    against device.target_firmware_version - if a device somehow asks for a
+    version nobody actually pushed to it, that's harmless (it just gets
+    that binary, same as any other authenticated device would), so there's
+    no reason to add a second check here beyond the bearer auth already
+    required to reach this at all."""
+    build = db.query(models.FirmwareBuild).filter(models.FirmwareBuild.version == version).first()
+    if not build:
+        raise HTTPException(status_code=404, detail="Firmware version not found")
+    return Response(
+        content=build.data,
+        media_type="application/octet-stream",
+        headers={"Content-Length": str(build.size_bytes)},
     )
 
 
@@ -400,6 +444,7 @@ def _device_to_out(device: models.Device, db: Session) -> schemas.DeviceOut:
         last_reboot_at=device.last_reboot_at,
         slide_sync_status=device.slide_sync_status,
         slide_synced_at=device.slide_synced_at,
+        target_firmware_version=device.target_firmware_version,
     )
 
 
@@ -517,3 +562,144 @@ def force_reactivate(device_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(device)
     return _device_to_out(device, db)
+
+
+# =============================================================================
+# Firmware management (admin side) - upload a compiled .bin, then push a
+# version to one device or the whole fleet. See the download endpoint above
+# for the device-facing half, and Device.target_firmware_version /
+# checkin()'s fw_update_available for how a push actually reaches a device.
+# =============================================================================
+
+@app.post(
+    "/api/v1/admin/firmware/upload",
+    response_model=schemas.FirmwareBuildOut,
+    dependencies=[Depends(require_admin)],
+)
+async def upload_firmware(
+    version: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Stores a compiled .bin in Postgres (see FirmwareBuild - Railway's own
+    disk doesn't survive a redeploy, the database does). Re-uploading the
+    same version string overwrites the existing row - handy while iterating
+    on a build before it's ready to push anywhere, but be careful not to
+    reuse a version string that's already been pushed to a device unless
+    you actually mean to change what that device fetches next."""
+    version = version.strip()
+    if not version:
+        raise HTTPException(status_code=422, detail="Version can't be blank")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty")
+
+    build = db.query(models.FirmwareBuild).filter(models.FirmwareBuild.version == version).first()
+    if build:
+        build.data = data
+        build.size_bytes = len(data)
+        build.uploaded_at = now_utc()
+    else:
+        build = models.FirmwareBuild(version=version, data=data, size_bytes=len(data))
+    db.add(build)
+    db.commit()
+    db.refresh(build)
+    logger.info("Firmware: uploaded version=%s (%d bytes)", version, build.size_bytes)
+    return build
+
+
+@app.get(
+    "/api/v1/admin/firmware",
+    response_model=schemas.FirmwareListOut,
+    dependencies=[Depends(require_admin)],
+)
+def list_firmware(db: Session = Depends(get_db)):
+    builds = db.query(models.FirmwareBuild).order_by(models.FirmwareBuild.uploaded_at.desc()).all()
+    return schemas.FirmwareListOut(builds=builds)
+
+
+@app.delete(
+    "/api/v1/admin/firmware/{version}",
+    dependencies=[Depends(require_admin)],
+)
+def delete_firmware(version: str, db: Session = Depends(get_db)):
+    """Removes an uploaded build. Doesn't touch any device that already has
+    this version installed, and doesn't clear target_firmware_version on a
+    device a push to this version is still pending for - if that happens,
+    the device's next attempt to download it will just 404 and it'll keep
+    running whatever it's currently on, logged the same as any other failed
+    download. Re-upload the version (or push a different one) to recover."""
+    build = db.query(models.FirmwareBuild).filter(models.FirmwareBuild.version == version).first()
+    if not build:
+        raise HTTPException(status_code=404, detail="Firmware version not found")
+    db.delete(build)
+    db.commit()
+    logger.info("Firmware: deleted version=%s", version)
+    return {"version": version, "deleted": True}
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/push-firmware",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def push_firmware(device_id: str, body: schemas.FirmwarePushIn, db: Session = Depends(get_db)):
+    """Doesn't push anything to the device directly - there's no way to
+    reach a device that isn't already asking the backend something. This
+    just marks device_id as wanting the given version, so its *next*
+    check-in (up to CHECKIN_INTERVAL_MS away, or immediately if a trigger
+    like a WiFi reconnect fires first) gets told an update is available and
+    where to fetch it - see checkin()'s fw_update_available computation."""
+    version = body.version.strip()
+    build = db.query(models.FirmwareBuild).filter(models.FirmwareBuild.version == version).first()
+    if not build:
+        raise HTTPException(status_code=404, detail="Firmware version not found - upload it first")
+    device = _get_device_or_404(device_id, db)
+    device.target_firmware_version = version
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    logger.info("Firmware: pushed version=%s to device=%s", version, device_id)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/cancel-firmware-push",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def cancel_firmware_push(device_id: str, db: Session = Depends(get_db)):
+    """Clears a pending push before the device has picked it up - e.g. the
+    wrong version got pushed by mistake. Once the device has already
+    fetched and applied it, this obviously can't undo that; it's only a
+    safety valve for the window before it does."""
+    device = _get_device_or_404(device_id, db)
+    device.target_firmware_version = None
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/firmware/{version}/push-all",
+    response_model=schemas.FirmwarePushAllOut,
+    dependencies=[Depends(require_admin)],
+)
+def push_firmware_all(version: str, db: Session = Depends(get_db)):
+    """Same as push_firmware above, just applied to every device in the
+    fleet at once rather than one at a time. Strongly worth pushing to a
+    single device first and confirming it checks in normally on the new
+    version before ever using this - see the firmware's
+    applyFirmwareUpdate() comment on why there's no automatic rollback if a
+    bad build flashes cleanly but is otherwise broken."""
+    build = db.query(models.FirmwareBuild).filter(models.FirmwareBuild.version == version).first()
+    if not build:
+        raise HTTPException(status_code=404, detail="Firmware version not found - upload it first")
+    devices = db.query(models.Device).all()
+    for d in devices:
+        d.target_firmware_version = version
+        db.add(d)
+    db.commit()
+    logger.info("Firmware: pushed version=%s to all devices (%d)", version, len(devices))
+    return schemas.FirmwarePushAllOut(version=version, devices_updated=len(devices))

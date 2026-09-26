@@ -42,6 +42,14 @@ class CheckinResponse(BaseModel):
     # pairing/creation time (see CheckinRequest.name above) and would show
     # blank instead of the real current name.
     name: str
+    # True exactly when an admin has pushed a firmware version (see
+    # Device.target_firmware_version) that differs from the firmware_version
+    # this device just reported above. firmware_update_version is only
+    # populated alongside it, naming which version to fetch from
+    # GET /api/v1/devices/{device_id}/firmware/{version}. Both default so a
+    # normal check-in with no pending update just gets false/None.
+    firmware_update_available: bool = False
+    firmware_update_version: Optional[str] = None
 
 
 class CustomerCreate(BaseModel):
@@ -87,10 +95,37 @@ class DeviceOut(BaseModel):
     last_reboot_at: Optional[datetime] = None
     slide_sync_status: Optional[str] = None
     slide_synced_at: Optional[datetime] = None
+    # Set while an admin has pushed a firmware version this device hasn't
+    # yet reported back as its own (see Device.target_firmware_version) -
+    # None means no update is pending. Lets the dashboard show a "pending"
+    # note on a device row until it's actually flashed and rebooted.
+    target_firmware_version: Optional[str] = None
 
 
 class DeviceListOut(BaseModel):
     devices: List[DeviceOut]
+
+
+class FirmwareBuildOut(BaseModel):
+    version: str
+    size_bytes: int
+    uploaded_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class FirmwareListOut(BaseModel):
+    builds: List[FirmwareBuildOut]
+
+
+class FirmwarePushIn(BaseModel):
+    version: str
+
+
+class FirmwarePushAllOut(BaseModel):
+    version: str
+    devices_updated: int
 
 
 class DeviceDeleteOut(BaseModel):

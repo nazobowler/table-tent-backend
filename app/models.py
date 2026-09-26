@@ -3,7 +3,7 @@ import string
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import relationship
 
 from .database import Base
@@ -73,6 +73,17 @@ class Device(Base):
     # fleet list, since it can be a few KB and isn't needed for every row.
     recent_log = Column(String, nullable=True)
 
+    # Set by an admin action (POST /push-firmware or /firmware/{version}/push-all
+    # in main.py) to request this device install a specific firmware version.
+    # Compared against the device's own self-reported firmware_version above
+    # on every check-in (see checkin()) - as long as they differ, the
+    # check-in response tells the device an update is waiting and hands it a
+    # download URL. Once the device flashes it and reboots, its next
+    # check-in reports the matching version and this "pending update" state
+    # clears itself - same computed-not-stored pattern already used for
+    # manually_suspended/effective_status, no separate "mark complete" step.
+    target_firmware_version = Column(String, nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     customer = relationship("Customer", back_populates="devices")
@@ -98,3 +109,23 @@ class PendingClaim(Base):
     # this up on retries.
     device_id = Column(String, nullable=True)
     secret = Column(String, nullable=True)
+
+
+class FirmwareBuild(Base):
+    """A compiled firmware .bin uploaded from the dashboard, stored right in
+    Postgres rather than on Railway's local disk - the disk doesn't survive
+    a redeploy, the database does, and these binaries are only a couple MB
+    at most, well within what a bytea column comfortably holds. `version` is
+    a free-form label Kyle assigns on upload (e.g. "1.1.0") - re-uploading
+    the same version string overwrites the existing row, which is
+    convenient while iterating on a build before it's ready to push
+    anywhere, but means a version string that HAS already been pushed to a
+    device shouldn't be reused for a different binary without meaning to
+    replace what that device will fetch next."""
+
+    __tablename__ = "firmware_builds"
+
+    version = Column(String, primary_key=True)
+    size_bytes = Column(Integer, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), default=now_utc)

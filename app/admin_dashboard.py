@@ -135,6 +135,17 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
   </div>
 
   <div class="panel">
+    <h2>Firmware</h2>
+    <div id="firmwareTableWrap"><div class="empty">Loading…</div></div>
+    <div class="add-customer-row">
+      <input id="newFirmwareVersion" type="text" placeholder="Version (e.g. 1.1.0)" style="max-width:180px;">
+      <input id="newFirmwareFile" type="file" accept=".bin">
+      <button class="primary" id="uploadFirmwareBtn">Upload</button>
+    </div>
+    <div class="muted-note">Uploading a build doesn't push it anywhere by itself - use Push (per device, in the Devices table) or Push to all below once it's here.</div>
+  </div>
+
+  <div class="panel">
     <h2>Customers</h2>
     <div id="customersTableWrap"><div class="empty">Loading…</div></div>
     <div class="add-customer-row">
@@ -147,7 +158,11 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
 <script>
 (function () {
   var STORAGE_KEY = "tt_admin_key";
-  var state = { devices: [], customers: [], pending: [], expandedLogs: {}, logCache: {}, confirmDelete: {}, renaming: {} };
+  var state = {
+    devices: [], customers: [], pending: [], firmware: [],
+    expandedLogs: {}, logCache: {}, confirmDelete: {}, renaming: {},
+    pushingFirmware: {}, confirmDeleteFirmware: {}, confirmPushAll: false
+  };
   var refreshTimer = null;
 
   function getKey() {
@@ -217,6 +232,29 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       throw new Error(detail || ("HTTP " + res.status));
     }
     if (res.status === 204) return null;
+    return res.json();
+  }
+
+  // Separate from apiFetch() above because that one always JSON-encodes
+  // opts.body and sets Content-Type: application/json - a multipart file
+  // upload needs FormData with no Content-Type set at all (the browser
+  // fills in the boundary itself). Same auth/401 handling either way.
+  async function apiUpload(path, formData) {
+    var res = await fetch(path, {
+      method: "POST",
+      headers: { "X-Admin-Key": getKey() },
+      body: formData,
+    });
+    if (res.status === 401) {
+      clearKey();
+      showLogin("That key was rejected. Enter the current admin key.");
+      throw new Error("unauthorized");
+    }
+    if (!res.ok) {
+      var detail = "";
+      try { detail = (await res.json()).detail || ""; } catch (e) {}
+      throw new Error(detail || ("HTTP " + res.status));
+    }
     return res.json();
   }
 
@@ -316,7 +354,11 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             : '') +
         '</td>' +
         '<td>' + fmtRelative(d.last_checkin_at) + '</td>' +
-        '<td class="dim">' + escapeHtml(d.firmware_version || "—") + '</td>' +
+        '<td class="dim">' + escapeHtml(d.firmware_version || "—") +
+          (d.target_firmware_version && d.target_firmware_version !== d.firmware_version
+            ? '<div class="muted-note">&rarr; ' + escapeHtml(d.target_firmware_version) + ' pending</div>'
+            : '') +
+        '</td>' +
         '<td class="dim">' + (d.wifi_rssi_dbm != null ? d.wifi_rssi_dbm + " dBm" : "—") + '</td>' +
         '<td class="dim">' + (d.grace_expires_at ? fmtRelative(d.grace_expires_at) : "—") + '</td>' +
         '<td><div class="row-actions">' +
@@ -324,6 +366,14 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             ? '<span class="dim" style="font-size:12px;">Delete forever?</span>' +
               '<button class="danger" data-action="confirm-delete" data-device="' + escapeHtml(d.device_id) + '">Yes, delete</button>' +
               '<button data-action="cancel-delete" data-device="' + escapeHtml(d.device_id) + '">Cancel</button>'
+            : state.pushingFirmware[d.device_id]
+            ? '<select class="push-fw-select" data-device="' + escapeHtml(d.device_id) + '">' +
+                state.firmware.map(function (b) {
+                  return '<option value="' + escapeHtml(b.version) + '">' + escapeHtml(b.version) + '</option>';
+                }).join("") +
+              '</select>' +
+              '<button class="primary" data-action="confirm-push-fw" data-device="' + escapeHtml(d.device_id) + '">Push</button>' +
+              '<button data-action="cancel-push-fw" data-device="' + escapeHtml(d.device_id) + '">Cancel</button>'
             : '<button data-action="rename" data-device="' + escapeHtml(d.device_id) + '">Rename</button>' +
               '<button data-action="' + (d.manually_suspended ? "reactivate" : "suspend") + '" data-device="' + escapeHtml(d.device_id) + '">' +
                 (d.manually_suspended ? "Reactivate" : "Suspend") +
@@ -332,6 +382,12 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
               '<button data-action="toggle-log" data-device="' + escapeHtml(d.device_id) + '">' +
                 (state.expandedLogs[d.device_id] ? "Hide log" : "Log") +
               '</button>' +
+              (state.firmware.length
+                ? '<button data-action="push-fw" data-device="' + escapeHtml(d.device_id) + '">Push FW</button>'
+                : '') +
+              (d.target_firmware_version
+                ? '<button data-action="cancel-fw-target" data-device="' + escapeHtml(d.device_id) + '">Cancel update</button>'
+                : '') +
               '<button class="danger" data-action="delete" data-device="' + escapeHtml(d.device_id) + '">Delete</button>'
           ) +
         '</div></td>' +
@@ -474,6 +530,138 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
           .then(function () { btn.disabled = false; });
       });
     });
+
+    wrap.querySelectorAll('button[data-action="push-fw"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        state.pushingFirmware[deviceId] = true;
+        renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="cancel-push-fw"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        delete state.pushingFirmware[deviceId];
+        renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="confirm-push-fw"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        var select = wrap.querySelector('.push-fw-select[data-device="' + deviceId + '"]');
+        var version = select ? select.value : "";
+        if (!version) { showBanner("error", "No firmware version selected."); return; }
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/push-firmware", {
+          method: "POST",
+          body: { version: version },
+        })
+          .then(function () {
+            delete state.pushingFirmware[deviceId];
+            showBanner("success", "Pushed <strong>" + escapeHtml(version) + "</strong> to this device - it'll pick it up on its next check-in.");
+            return loadAll();
+          })
+          .catch(function (e) { showBanner("error", "Push failed: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="cancel-fw-target"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/cancel-firmware-push", { method: "POST" })
+          .then(function () { return loadAll(); })
+          .catch(function (e) { showBanner("error", "Couldn't cancel: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
+      });
+    });
+  }
+
+  function renderFirmware() {
+    var wrap = document.getElementById("firmwareTableWrap");
+    if (!state.firmware.length) {
+      wrap.innerHTML = '<div class="empty">No firmware builds uploaded yet.</div>';
+      return;
+    }
+    var html = '<table><thead><tr><th>Version</th><th>Size</th><th>Uploaded</th><th></th></tr></thead><tbody>';
+    state.firmware.forEach(function (b) {
+      html += '<tr>' +
+        '<td>' + escapeHtml(b.version) + '</td>' +
+        '<td class="dim">' + (b.size_bytes / 1024).toFixed(0) + ' KB</td>' +
+        '<td class="dim">' + fmtRelative(b.uploaded_at) + '</td>' +
+        '<td><div class="row-actions">' +
+          (state.confirmDeleteFirmware[b.version]
+            ? '<span class="dim" style="font-size:12px;">Delete forever?</span>' +
+              '<button class="danger" data-action="confirm-delete-fw" data-version="' + escapeHtml(b.version) + '">Yes, delete</button>' +
+              '<button data-action="cancel-delete-fw" data-version="' + escapeHtml(b.version) + '">Cancel</button>'
+            : state.confirmPushAll === b.version
+            ? '<span class="dim" style="font-size:12px;">Push to all ' + state.devices.length + ' device(s)?</span>' +
+              '<button class="primary" data-action="confirm-push-all" data-version="' + escapeHtml(b.version) + '">Yes, push to all</button>' +
+              '<button data-action="cancel-push-all" data-version="' + escapeHtml(b.version) + '">Cancel</button>'
+            : '<button class="primary" data-action="push-all" data-version="' + escapeHtml(b.version) + '">Push to all</button>' +
+              '<button class="danger" data-action="delete-fw" data-version="' + escapeHtml(b.version) + '">Delete</button>'
+          ) +
+        '</div></td>' +
+      '</tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+
+    wrap.querySelectorAll('button[data-action="delete-fw"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        state.confirmDeleteFirmware[btn.getAttribute("data-version")] = true;
+        renderFirmware();
+      });
+    });
+    wrap.querySelectorAll('button[data-action="cancel-delete-fw"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        delete state.confirmDeleteFirmware[btn.getAttribute("data-version")];
+        renderFirmware();
+      });
+    });
+    wrap.querySelectorAll('button[data-action="confirm-delete-fw"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var version = btn.getAttribute("data-version");
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/firmware/" + encodeURIComponent(version), { method: "DELETE" })
+          .then(function () {
+            delete state.confirmDeleteFirmware[version];
+            showBanner("success", "Deleted firmware build <strong>" + escapeHtml(version) + "</strong>.");
+            return loadAll();
+          })
+          .catch(function (e) { showBanner("error", "Delete failed: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
+      });
+    });
+    wrap.querySelectorAll('button[data-action="push-all"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        state.confirmPushAll = btn.getAttribute("data-version");
+        renderFirmware();
+      });
+    });
+    wrap.querySelectorAll('button[data-action="cancel-push-all"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        state.confirmPushAll = false;
+        renderFirmware();
+      });
+    });
+    wrap.querySelectorAll('button[data-action="confirm-push-all"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var version = btn.getAttribute("data-version");
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/firmware/" + encodeURIComponent(version) + "/push-all", { method: "POST" })
+          .then(function (result) {
+            state.confirmPushAll = false;
+            showBanner("success", "Pushed <strong>" + escapeHtml(version) + "</strong> to " + result.devices_updated + " device(s) - each picks it up on its next check-in.");
+            return loadAll();
+          })
+          .catch(function (e) { showBanner("error", "Push to all failed: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
+      });
+    });
   }
 
   function renderPending() {
@@ -560,6 +748,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
   function renderAll() {
     renderDevices();
     renderPending();
+    renderFirmware();
     renderCustomers();
     document.getElementById("lastUpdated").textContent = "Updated " + new Date().toLocaleTimeString();
   }
@@ -569,10 +758,12 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       apiFetch("/api/v1/admin/devices"),
       apiFetch("/api/v1/admin/customers"),
       apiFetch("/api/v1/admin/pairing/pending"),
+      apiFetch("/api/v1/admin/firmware"),
     ]);
     state.devices = results[0];
     state.customers = results[1];
     state.pending = results[2];
+    state.firmware = results[3].builds;
     renderAll();
   }
 
@@ -613,6 +804,29 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       if (e.message !== "unauthorized") showBanner("error", "Refresh failed: " + escapeHtml(e.message));
     });
   });
+  document.getElementById("uploadFirmwareBtn").addEventListener("click", function () {
+    var versionInput = document.getElementById("newFirmwareVersion");
+    var fileInput = document.getElementById("newFirmwareFile");
+    var version = versionInput.value.trim();
+    var file = fileInput.files && fileInput.files[0];
+    if (!version) { showBanner("error", "Enter a version string (e.g. 1.1.0)."); return; }
+    if (!file) { showBanner("error", "Choose a .bin file to upload."); return; }
+    var formData = new FormData();
+    formData.append("version", version);
+    formData.append("file", file);
+    var btn = document.getElementById("uploadFirmwareBtn");
+    btn.disabled = true;
+    apiUpload("/api/v1/admin/firmware/upload", formData)
+      .then(function (result) {
+        versionInput.value = "";
+        fileInput.value = "";
+        showBanner("success", "Uploaded firmware <strong>" + escapeHtml(result.version) + "</strong> (" + (result.size_bytes / 1024).toFixed(0) + " KB).");
+        return loadAll();
+      })
+      .catch(function (e) { showBanner("error", "Upload failed: " + escapeHtml(e.message)); })
+      .then(function () { btn.disabled = false; });
+  });
+
   document.getElementById("addCustomerBtn").addEventListener("click", function () {
     var input = document.getElementById("newCustomerName");
     var name = input.value.trim();
