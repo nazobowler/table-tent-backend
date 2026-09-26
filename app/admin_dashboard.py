@@ -147,7 +147,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
 <script>
 (function () {
   var STORAGE_KEY = "tt_admin_key";
-  var state = { devices: [], customers: [], pending: [], expandedLogs: {}, logCache: {}, confirmDelete: {} };
+  var state = { devices: [], customers: [], pending: [], expandedLogs: {}, logCache: {}, confirmDelete: {}, renaming: {} };
   var refreshTimer = null;
 
   function getKey() {
@@ -299,7 +299,16 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       '</tr></thead><tbody>';
     rows.forEach(function (d) {
       html += '<tr>' +
-        '<td>' + escapeHtml(d.name) + '<div class="dim">' + escapeHtml(d.device_id) + '</div></td>' +
+        '<td>' +
+          (state.renaming[d.device_id]
+            ? '<input type="text" class="rename-input" data-device="' + escapeHtml(d.device_id) + '" value="' + escapeHtml(d.name) + '" style="width:150px;">' +
+              '<div class="row-actions" style="margin-top:4px;">' +
+              '<button class="primary" data-action="save-rename" data-device="' + escapeHtml(d.device_id) + '">Save</button>' +
+              '<button data-action="cancel-rename" data-device="' + escapeHtml(d.device_id) + '">Cancel</button>' +
+              '</div>'
+            : escapeHtml(d.name)) +
+          '<div class="dim">' + escapeHtml(d.device_id) + '</div>' +
+        '</td>' +
         '<td>' + escapeHtml(d.customer_name) + '</td>' +
         '<td>' + statusBadge(d) +
           (d.device_locally_suspended && !d.manually_suspended
@@ -315,7 +324,8 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             ? '<span class="dim" style="font-size:12px;">Delete forever?</span>' +
               '<button class="danger" data-action="confirm-delete" data-device="' + escapeHtml(d.device_id) + '">Yes, delete</button>' +
               '<button data-action="cancel-delete" data-device="' + escapeHtml(d.device_id) + '">Cancel</button>'
-            : '<button data-action="' + (d.manually_suspended ? "reactivate" : "suspend") + '" data-device="' + escapeHtml(d.device_id) + '">' +
+            : '<button data-action="rename" data-device="' + escapeHtml(d.device_id) + '">Rename</button>' +
+              '<button data-action="' + (d.manually_suspended ? "reactivate" : "suspend") + '" data-device="' + escapeHtml(d.device_id) + '">' +
                 (d.manually_suspended ? "Reactivate" : "Suspend") +
               '</button>' +
               '<button data-action="reset-grace" data-device="' + escapeHtml(d.device_id) + '">Reset grace</button>' +
@@ -378,6 +388,57 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
         var deviceId = btn.getAttribute("data-device");
         delete state.expandedLogs[deviceId];
         renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="rename"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        state.renaming[deviceId] = true;
+        renderDevices();
+        var input = wrap.querySelector('.rename-input[data-device="' + deviceId + '"]');
+        if (input) { input.focus(); input.select(); }
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="cancel-rename"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        delete state.renaming[deviceId];
+        renderDevices();
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="save-rename"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        var input = wrap.querySelector('.rename-input[data-device="' + deviceId + '"]');
+        var newName = (input ? input.value : "").trim();
+        if (!newName) { showBanner("error", "Name can't be blank."); return; }
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/rename", {
+          method: "POST",
+          body: { name: newName },
+        })
+          .then(function () {
+            delete state.renaming[deviceId];
+            return loadAll();
+          })
+          .catch(function (e) { showBanner("error", "Rename failed: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
+      });
+    });
+
+    wrap.querySelectorAll('.rename-input').forEach(function (input) {
+      input.addEventListener("keydown", function (e) {
+        var deviceId = input.getAttribute("data-device");
+        if (e.key === "Enter") {
+          var saveBtn = wrap.querySelector('button[data-action="save-rename"][data-device="' + deviceId + '"]');
+          if (saveBtn) saveBtn.click();
+        } else if (e.key === "Escape") {
+          delete state.renaming[deviceId];
+          renderDevices();
+        }
       });
     });
 

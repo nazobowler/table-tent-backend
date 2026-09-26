@@ -20,6 +20,14 @@ class CheckinRequest(BaseModel):
     # Tail of the device's in-RAM log buffer (a few KB at most). A snapshot
     # as of this check-in, not a live stream.
     recent_log: Optional[str] = None
+    # Set only once the customer has renamed the device from its own Settings
+    # menu (Settings -> Device Name) - the device's local name override is
+    # blank by default (never sent) so it doesn't clobber whatever name an
+    # admin set at pairing/creation time until the customer actually renames
+    # it themselves. From that point on, the device is the source of truth
+    # for its own name on every check-in - see the note on the rename
+    # endpoint below about the resulting two-sided-edit conflict.
+    name: Optional[str] = None
 
 
 class CheckinResponse(BaseModel):
@@ -80,6 +88,10 @@ class DeviceListOut(BaseModel):
 
 class DeviceDeleteOut(BaseModel):
     device_id: str
+    name: str
+
+
+class DeviceRenameIn(BaseModel):
     name: str
 
 

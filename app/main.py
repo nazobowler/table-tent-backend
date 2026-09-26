@@ -118,6 +118,18 @@ def checkin(
         # (4000) - keeps a modified or future client from growing this
         # column unbounded.
         device.recent_log = body.recent_log[-8000:]
+    if body.name is not None and body.name.strip():
+        # The device only ever sends this once the customer has renamed it
+        # from Settings -> Device Name (see schemas.py) - a blank/omitted
+        # name here means "no local override," not "clear the name," so
+        # there's no way for a device that's never touched this feature to
+        # accidentally blank out an admin-set name. Once a device does start
+        # sending a name, it's the source of truth for itself going forward:
+        # an admin rename via the dashboard (see /rename below) can get
+        # overwritten by the device's own name on its next check-in, the
+        # same two-sided-edit tradeoff already accepted for
+        # device_locally_suspended.
+        device.name = body.name.strip()[:100]
 
     db.add(device)
     db.commit()
@@ -450,6 +462,28 @@ def _get_device_or_404(device_id: str, db: Session) -> models.Device:
 def reset_grace(device_id: str, db: Session = Depends(get_db)):
     device = _get_device_or_404(device_id, db)
     device.grace_started_at = now_utc()
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/rename",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def rename_device(device_id: str, body: schemas.DeviceRenameIn, db: Session = Depends(get_db)):
+    """Admin-side rename, from the dashboard. Note this can be overwritten by
+    the device's own next check-in if the customer has ever renamed it from
+    the device's own Settings menu (Settings -> Device Name) - see the
+    comment on checkin()'s handling of body.name. Both sides can rename;
+    whichever renamed most recently wins, same as the two suspend flags."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name can't be blank")
+    device = _get_device_or_404(device_id, db)
+    device.name = name[:100]
     db.add(device)
     db.commit()
     db.refresh(device)
