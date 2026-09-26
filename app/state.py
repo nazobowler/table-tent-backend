@@ -35,10 +35,16 @@ def compute_effective_state(device, customer, now=None) -> EffectiveState:
     payment-failure grace -> active."""
     now = now or datetime.now(timezone.utc)
 
-    # 1. A manual override (from the admin dashboard/API) always wins - a
-    # support action should be able to force the screen either way,
-    # independent of whatever Stripe or the check-in clock says.
-    if device.manually_suspended:
+    # 1. A manual override - from the admin dashboard/API, or from the
+    # device's own local Suspend toggle (see device_locally_suspended on the
+    # model) - always wins, independent of whatever Stripe or the check-in
+    # clock says. Either source alone is enough to suspend; both need to be
+    # clear for the device to show as active again. The backend can't reach
+    # into a device to flip its local toggle, so a device_locally_suspended
+    # device only clears once it reports locally_suspended=false on some
+    # later check-in - the dashboard says as much rather than implying
+    # Reactivate always works.
+    if device.manually_suspended or device.device_locally_suspended:
         return EffectiveState("failed", failure_code=423)
 
     # 2. Offline cap - protects against a device being taken offline

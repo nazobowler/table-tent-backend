@@ -7,6 +7,7 @@ from typing import List
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -18,6 +19,37 @@ from .state import compute_effective_state, _aware
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("table-tent-backend")
 
+
+def _ensure_device_columns():
+    """create_all() below only creates missing TABLES, not missing COLUMNS
+    on a table that already exists with real rows in it - fine for a brand
+    new table like pending_claims, not fine for `devices`, which already has
+    live data in production. Rather than asking for a manual ALTER TABLE on
+    Railway's Postgres every time a column gets added to the model (no
+    Alembic here yet - see "DB migrations" in the status doc), this checks
+    for any column the current model expects but the live table doesn't
+    have, and adds it. A no-op after the first boot that picks up a given
+    column. Uses plain ALTER TABLE ... ADD COLUMN, which both SQLite and
+    Postgres support with the same syntax for these simple column types.
+    """
+    inspector = inspect(engine)
+    if "devices" not in inspector.get_table_names():
+        return  # create_all() below will make it fresh with every column already
+    existing = {c["name"] for c in inspector.get_columns("devices")}
+    statements = []
+    if "device_locally_suspended" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN device_locally_suspended BOOLEAN NOT NULL DEFAULT false")
+    if "recent_log" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN recent_log TEXT")
+    if not statements:
+        return
+    with engine.begin() as conn:
+        for stmt in statements:
+            logger.info("Startup migration: %s", stmt)
+            conn.execute(text(stmt))
+
+
+_ensure_device_columns()
 Base.metadata.create_all(bind=engine)
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_placeholder")
@@ -79,6 +111,13 @@ def checkin(
         device.slide_sync_status = body.slide_sync_status
         if body.slide_sync_status == "synced":
             device.slide_synced_at = now
+    if body.locally_suspended is not None:
+        device.device_locally_suspended = body.locally_suspended
+    if body.recent_log is not None:
+        # Defensive cap independent of the firmware's own SERIAL_LOG_MAX_CHARS
+        # (4000) - keeps a modified or future client from growing this
+        # column unbounded.
+        device.recent_log = body.recent_log[-8000:]
 
     db.add(device)
     db.commit()
@@ -342,6 +381,7 @@ def _device_to_out(device: models.Device, db: Session) -> schemas.DeviceOut:
         grace_expires_at=eff.grace_expires_at,
         last_checkin_at=device.last_checkin_at,
         manually_suspended=device.manually_suspended,
+        device_locally_suspended=device.device_locally_suspended,
         firmware_version=device.firmware_version,
         wifi_rssi_dbm=device.wifi_rssi_dbm,
         last_reboot_at=device.last_reboot_at,
@@ -354,6 +394,20 @@ def _device_to_out(device: models.Device, db: Session) -> schemas.DeviceOut:
 def list_devices(db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
     return [_device_to_out(d, db) for d in devices]
+
+
+@app.get(
+    "/api/v1/admin/devices/{device_id}/log",
+    response_model=schemas.DeviceLogOut,
+    dependencies=[Depends(require_admin)],
+)
+def device_log(device_id: str, db: Session = Depends(get_db)):
+    """Tail of the device's own log buffer, as of its last check-in - not a
+    live stream (see recent_log on the model / performCheckin() in the
+    firmware). Kept as its own endpoint rather than part of DeviceOut so the
+    fleet list doesn't carry a few KB of text per row on every refresh."""
+    device = _get_device_or_404(device_id, db)
+    return schemas.DeviceLogOut(device_id=device.id, log=device.recent_log, as_of=device.last_checkin_at)
 
 
 def _get_device_or_404(device_id: str, db: Session) -> models.Device:

@@ -147,7 +147,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
 <script>
 (function () {
   var STORAGE_KEY = "tt_admin_key";
-  var state = { devices: [], customers: [], pending: [] };
+  var state = { devices: [], customers: [], pending: [], expandedLogs: {}, logCache: {} };
   var refreshTimer = null;
 
   function getKey() {
@@ -235,7 +235,13 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
   }
 
   function statusBadge(device) {
-    if (device.manually_suspended) return '<span class="badge suspended">Suspended</span>';
+    if (device.manually_suspended || device.device_locally_suspended) {
+      var label = "Suspended";
+      if (device.manually_suspended && device.device_locally_suspended) label = "Suspended (admin + device)";
+      else if (device.device_locally_suspended) label = "Suspended (device)";
+      else label = "Suspended (admin)";
+      return '<span class="badge suspended">' + label + '</span>';
+    }
     if (device.effective_status === "active") return '<span class="badge active">Active</span>';
     if (device.effective_status === "grace") return '<span class="badge grace">Grace</span>';
     if (device.effective_status === "failed") {
@@ -244,6 +250,37 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       return '<span class="badge failed">Failed</span>';
     }
     return '<span class="badge">' + escapeHtml(device.effective_status) + '</span>';
+  }
+
+  function fetchDeviceLog(deviceId) {
+    return apiFetch("/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/log").then(function (result) {
+      state.logCache[deviceId] = result;
+      return result;
+    });
+  }
+
+  function logPanelHtml(d) {
+    var cached = state.logCache[d.device_id];
+    var body;
+    if (!cached) {
+      body = '<div class="empty">Loading…</div>';
+    } else if (!cached.log) {
+      body = '<div class="empty">No log received yet - this device hasn\\'t checked in since the log feature was added.</div>';
+    } else {
+      body = '<pre style="background:#0f1115; border:1px solid var(--panel-border); border-radius:6px; padding:10px; max-height:280px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; margin:0;">' +
+        escapeHtml(cached.log) + '</pre>' +
+        '<div class="muted-note">As of last check-in (' + fmtRelative(cached.as_of) + ') - not live, updates on the device\\'s next hourly check-in.</div>';
+    }
+    return '<tr class="log-row" data-log-row="' + escapeHtml(d.device_id) + '">' +
+      '<td colspan="8" style="background:#0d0f13;">' +
+      '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">' +
+      '<strong style="font-size:12px; color:var(--text-dim);">Log — ' + escapeHtml(d.name) + '</strong>' +
+      '<div class="row-actions">' +
+      '<button data-action="refresh-log" data-device="' + escapeHtml(d.device_id) + '">Refresh</button>' +
+      '<button data-action="close-log" data-device="' + escapeHtml(d.device_id) + '">Close</button>' +
+      '</div></div>' +
+      body +
+      '</td></tr>';
   }
 
   function renderDevices() {
@@ -264,7 +301,11 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       html += '<tr>' +
         '<td>' + escapeHtml(d.name) + '<div class="dim">' + escapeHtml(d.device_id) + '</div></td>' +
         '<td>' + escapeHtml(d.customer_name) + '</td>' +
-        '<td>' + statusBadge(d) + '</td>' +
+        '<td>' + statusBadge(d) +
+          (d.device_locally_suspended && !d.manually_suspended
+            ? '<div class="muted-note">Reactivate here won\\'t clear this - it self-clears when the device reports its toggle is off.</div>'
+            : '') +
+        '</td>' +
         '<td>' + fmtRelative(d.last_checkin_at) + '</td>' +
         '<td class="dim">' + escapeHtml(d.firmware_version || "—") + '</td>' +
         '<td class="dim">' + (d.wifi_rssi_dbm != null ? d.wifi_rssi_dbm + " dBm" : "—") + '</td>' +
@@ -274,13 +315,19 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             (d.manually_suspended ? "Reactivate" : "Suspend") +
           '</button>' +
           '<button data-action="reset-grace" data-device="' + escapeHtml(d.device_id) + '">Reset grace</button>' +
+          '<button data-action="toggle-log" data-device="' + escapeHtml(d.device_id) + '">' +
+            (state.expandedLogs[d.device_id] ? "Hide log" : "Log") +
+          '</button>' +
         '</div></td>' +
       '</tr>';
+      if (state.expandedLogs[d.device_id]) {
+        html += logPanelHtml(d);
+      }
     });
     html += '</tbody></table>';
     wrap.innerHTML = html;
 
-    wrap.querySelectorAll("button[data-action]").forEach(function (btn) {
+    wrap.querySelectorAll('button[data-action="suspend"], button[data-action="reactivate"], button[data-action="reset-grace"]').forEach(function (btn) {
       btn.addEventListener("click", function () {
         var action = btn.getAttribute("data-action");
         var deviceId = btn.getAttribute("data-device");
@@ -291,6 +338,40 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
           .then(function () { return loadAll(); })
           .catch(function (e) { showBanner("error", "Action failed: " + escapeHtml(e.message)); })
           .then(function () { btn.disabled = false; });
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="toggle-log"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        if (state.expandedLogs[deviceId]) {
+          delete state.expandedLogs[deviceId];
+          renderDevices();
+          return;
+        }
+        state.expandedLogs[deviceId] = true;
+        renderDevices();
+        fetchDeviceLog(deviceId).then(renderDevices).catch(function (e) {
+          showBanner("error", "Couldn't load log: " + escapeHtml(e.message));
+        });
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="refresh-log"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        btn.disabled = true;
+        fetchDeviceLog(deviceId).then(renderDevices).catch(function (e) {
+          showBanner("error", "Couldn't refresh log: " + escapeHtml(e.message));
+        }).then(function () { btn.disabled = false; });
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="close-log"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        delete state.expandedLogs[deviceId];
+        renderDevices();
       });
     });
   }

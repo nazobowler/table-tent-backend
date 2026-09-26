@@ -49,6 +49,15 @@ class Device(Base):
     last_checkin_at = Column(DateTime(timezone=True), nullable=True)
     grace_started_at = Column(DateTime(timezone=True), nullable=True)
     manually_suspended = Column(Boolean, nullable=False, default=False)
+    # Mirrors the device's own local Suspend/Reactivate toggle (its on-device
+    # web page), reported on every check-in. Previously this had no backend
+    # visibility at all - a device suspended locally looked "Active" on the
+    # admin dashboard even though it was showing "Back soon" in person. Kept
+    # as its own column rather than folded into manually_suspended, since
+    # they're different actors (whoever's standing at the unit vs an admin
+    # suspending for billing) and only the device itself can ever clear this
+    # one - reactivating from the dashboard can't reach into the device.
+    device_locally_suspended = Column(Boolean, nullable=False, default=False)
 
     # Diagnostics, all optional - reported by the device's check-in payload.
     firmware_version = Column(String, nullable=True)
@@ -56,6 +65,13 @@ class Device(Base):
     last_reboot_at = Column(DateTime(timezone=True), nullable=True)
     slide_sync_status = Column(String, nullable=True)  # synced | pending | stale
     slide_synced_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Tail of the device's in-RAM log buffer, sent with each check-in (see
+    # app/main.py's checkin() and the firmware's performCheckin()). A
+    # snapshot as of last_checkin_at, not a live stream - fetched on demand
+    # via GET /api/v1/admin/devices/{id}/log rather than included in the
+    # fleet list, since it can be a few KB and isn't needed for every row.
+    recent_log = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=now_utc)
 

@@ -12,6 +12,14 @@ class CheckinRequest(BaseModel):
     uptime_seconds: Optional[int] = None
     slide_sync_status: Optional[str] = None
     device_time: Optional[str] = None
+    # Whether the device's own local Suspend/Reactivate toggle (its on-device
+    # web page) is currently engaged - independent of admin-side
+    # manually_suspended. Optional so older firmware that doesn't send it
+    # yet doesn't fail validation.
+    locally_suspended: Optional[bool] = None
+    # Tail of the device's in-RAM log buffer (a few KB at most). A snapshot
+    # as of this check-in, not a live stream.
+    recent_log: Optional[str] = None
 
 
 class CheckinResponse(BaseModel):
@@ -58,6 +66,7 @@ class DeviceOut(BaseModel):
     grace_expires_at: Optional[datetime] = None
     last_checkin_at: Optional[datetime] = None
     manually_suspended: bool
+    device_locally_suspended: bool
     firmware_version: Optional[str] = None
     wifi_rssi_dbm: Optional[int] = None
     last_reboot_at: Optional[datetime] = None
@@ -67,6 +76,12 @@ class DeviceOut(BaseModel):
 
 class DeviceListOut(BaseModel):
     devices: List[DeviceOut]
+
+
+class DeviceLogOut(BaseModel):
+    device_id: str
+    log: Optional[str] = None
+    as_of: Optional[datetime] = None  # the check-in that produced this snapshot
 
 
 class PairingRequestOut(BaseModel):
