@@ -62,6 +62,16 @@ class Device(Base):
     # Diagnostics, all optional - reported by the device's check-in payload.
     firmware_version = Column(String, nullable=True)
     wifi_rssi_dbm = Column(Integer, nullable=True)
+    # The device's own local IP on whatever WiFi network it's joined
+    # (WiFi.localIP() in the firmware), reported on every check-in. Lets the
+    # dashboard link straight to a device's own on-device web page (its
+    # local Suspend/Reactivate toggle + live log tail) - only reachable by
+    # someone on the same physical network as the unit, which is the point:
+    # this is "find/view the device on your own network," not a
+    # backend-side remote view. A device whose IP changes (DHCP lease
+    # renewal, reconnect) just reports the new one on its next check-in;
+    # nothing here is a stable/reserved address.
+    local_ip = Column(String, nullable=True)
     last_reboot_at = Column(DateTime(timezone=True), nullable=True)
     slide_sync_status = Column(String, nullable=True)  # synced | pending | stale
     slide_synced_at = Column(DateTime(timezone=True), nullable=True)

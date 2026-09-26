@@ -43,6 +43,8 @@ def _ensure_device_columns():
         statements.append("ALTER TABLE devices ADD COLUMN recent_log TEXT")
     if "target_firmware_version" not in existing:
         statements.append("ALTER TABLE devices ADD COLUMN target_firmware_version TEXT")
+    if "local_ip" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN local_ip TEXT")
     if not statements:
         return
     with engine.begin() as conn:
@@ -129,6 +131,8 @@ def checkin(
         device.firmware_version = body.firmware_version
     if body.wifi_rssi_dbm is not None:
         device.wifi_rssi_dbm = body.wifi_rssi_dbm
+    if body.local_ip is not None and body.local_ip.strip():
+        device.local_ip = body.local_ip.strip()[:45]  # 45 = max IPv6 text length
     if body.uptime_seconds is not None:
         device.last_reboot_at = now - timedelta(seconds=body.uptime_seconds)
     if body.slide_sync_status is not None:
@@ -463,6 +467,7 @@ def _device_to_out(device: models.Device, db: Session) -> schemas.DeviceOut:
         device_locally_suspended=device.device_locally_suspended,
         firmware_version=device.firmware_version,
         wifi_rssi_dbm=device.wifi_rssi_dbm,
+        local_ip=device.local_ip,
         last_reboot_at=device.last_reboot_at,
         slide_sync_status=device.slide_sync_status,
         slide_synced_at=device.slide_synced_at,
