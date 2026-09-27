@@ -415,6 +415,34 @@ def pairing_status(code: str, db: Session = Depends(get_db)):
 
 
 # =============================================================================
+# Shared payment-status transitions - the actual effect a "payment failed" or
+# "payment succeeded" event has on a customer and their devices. Pulled out
+# of the Stripe webhook handler below so the admin-only force-payment-failed/
+# force-payment-succeeded testing endpoints (further down) apply the exact
+# same side effects a real Stripe event would, without needing a real Stripe
+# sandbox, a test card that actually declines, or waiting on Stripe's own
+# retry schedule to see the grace-period logic exercised end-to-end.
+# =============================================================================
+
+def _mark_payment_failed(customer: models.Customer, db: Session):
+    customer.subscription_status = "failed"
+    db.add(customer)
+    now = now_utc()
+    for dev in customer.devices:
+        if dev.grace_started_at is None:
+            dev.grace_started_at = now
+            db.add(dev)
+
+
+def _mark_payment_succeeded(customer: models.Customer, db: Session):
+    customer.subscription_status = "active"
+    db.add(customer)
+    for dev in customer.devices:
+        dev.grace_started_at = None
+        db.add(dev)
+
+
+# =============================================================================
 # Stripe webhook
 # =============================================================================
 
@@ -447,30 +475,15 @@ async def stripe_webhook(
         logger.info("Stripe event for unknown customer %s, ignored", stripe_customer_id)
         return {"received": True, "note": "unknown customer, ignored"}
 
-    now = now_utc()
-
     if event_type == "invoice.payment_failed":
-        customer.subscription_status = "failed"
-        db.add(customer)
-        for dev in customer.devices:
-            if dev.grace_started_at is None:
-                dev.grace_started_at = now
-                db.add(dev)
+        _mark_payment_failed(customer, db)
 
     elif event_type == "invoice.payment_succeeded":
-        customer.subscription_status = "active"
-        db.add(customer)
-        for dev in customer.devices:
-            dev.grace_started_at = None
-            db.add(dev)
+        _mark_payment_succeeded(customer, db)
 
     elif event_type == "customer.subscription.updated":
         if data_object.get("status") == "active":
-            customer.subscription_status = "active"
-            db.add(customer)
-            for dev in customer.devices:
-                dev.grace_started_at = None
-                db.add(dev)
+            _mark_payment_succeeded(customer, db)
 
     elif event_type == "customer.subscription.deleted":
         customer.subscription_status = "canceled"
@@ -503,6 +516,51 @@ def create_customer(body: schemas.CustomerCreate, db: Session = Depends(get_db))
 @app.get("/api/v1/admin/customers", response_model=List[schemas.CustomerOut], dependencies=[Depends(require_admin)])
 def list_customers(db: Session = Depends(get_db)):
     return db.query(models.Customer).all()
+
+
+def _get_customer_or_404(customer_id: int, db: Session) -> models.Customer:
+    customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return customer
+
+
+@app.post(
+    "/api/v1/admin/customers/{customer_id}/force-payment-failed",
+    response_model=schemas.CustomerOut,
+    dependencies=[Depends(require_admin)],
+)
+def force_payment_failed(customer_id: int, db: Session = Depends(get_db)):
+    """Testing-only stand-in for a real Stripe invoice.payment_failed event -
+    applies the exact same effect (_mark_payment_failed, shared with the real
+    webhook above) without needing an actual Stripe sandbox or a card that
+    genuinely declines. Lets the grace-period/Back-soon behavior be exercised
+    on a real device on demand."""
+    customer = _get_customer_or_404(customer_id, db)
+    _mark_payment_failed(customer, db)
+    db.commit()
+    db.refresh(customer)
+    logger.info("Admin forced payment FAILED for customer %s (%s)", customer.id, customer.name)
+    return customer
+
+
+@app.post(
+    "/api/v1/admin/customers/{customer_id}/force-payment-succeeded",
+    response_model=schemas.CustomerOut,
+    dependencies=[Depends(require_admin)],
+)
+def force_payment_succeeded(customer_id: int, db: Session = Depends(get_db)):
+    """Testing-only stand-in for a real Stripe invoice.payment_succeeded /
+    customer.subscription.updated(active) event - see force_payment_failed
+    above. Safe to call even when the customer is already active; it just
+    clears every device's grace clock, which is a no-op if there isn't one
+    running."""
+    customer = _get_customer_or_404(customer_id, db)
+    _mark_payment_succeeded(customer, db)
+    db.commit()
+    db.refresh(customer)
+    logger.info("Admin forced payment SUCCEEDED for customer %s (%s)", customer.id, customer.name)
+    return customer
 
 
 @app.post("/api/v1/admin/devices", response_model=schemas.DeviceCreateOut, dependencies=[Depends(require_admin)])

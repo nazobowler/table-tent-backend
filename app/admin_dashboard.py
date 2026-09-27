@@ -788,16 +788,35 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
     state.devices.forEach(function (d) {
       deviceCounts[d.customer_id] = (deviceCounts[d.customer_id] || 0) + 1;
     });
-    var html = '<table><thead><tr><th>Customer</th><th>Subscription</th><th>Devices</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>Customer</th><th>Subscription</th><th>Devices</th><th></th></tr></thead><tbody>';
     state.customers.forEach(function (c) {
       html += '<tr>' +
         '<td>' + escapeHtml(c.name) + '</td>' +
         '<td>' + customerBadge(c) + '</td>' +
         '<td class="dim">' + (deviceCounts[c.id] || 0) + '</td>' +
+        '<td><div class="row-actions">' +
+          '<button data-action="force-payment-failed" data-customer="' + c.id + '"' +
+            ' title="Testing only - simulates a real Stripe invoice.payment_failed event, without needing an actual declined card. Starts the grace clock on every device under this customer.">Force payment failed</button>' +
+          '<button data-action="force-payment-succeeded" data-customer="' + c.id + '"' +
+            ' title="Testing only - simulates a real Stripe invoice.payment_succeeded event. Clears the grace clock on every device under this customer.">Force payment succeeded</button>' +
+        '</div></td>' +
       '</tr>';
     });
     html += '</tbody></table>';
     wrap.innerHTML = html;
+
+    wrap.querySelectorAll('button[data-action="force-payment-failed"], button[data-action="force-payment-succeeded"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var action = btn.getAttribute("data-action");
+        var customerId = btn.getAttribute("data-customer");
+        var path = "/api/v1/admin/customers/" + encodeURIComponent(customerId) + "/" + action;
+        btn.disabled = true;
+        apiFetch(path, { method: "POST" })
+          .then(function () { return loadAll(); })
+          .catch(function (e) { showBanner("error", "Action failed: " + escapeHtml(e.message)); })
+          .then(function () { btn.disabled = false; });
+      });
+    });
   }
 
   function renderAll() {
