@@ -296,18 +296,39 @@ def checkin(
             logger.info("Location: device=%s scanned but saw no nearby access points", device.id)
         device.location_requested = False
 
-    db.add(device)
-    db.commit()
-    db.refresh(device)
-
     customer = db.query(models.Customer).filter(models.Customer.id == device.customer_id).first()
     if not customer:
         # Shouldn't happen (customer_id is a FK set at device creation), but
         # fail loudly rather than silently reporting a wrong status.
         raise HTTPException(status_code=500, detail="Device has no associated customer")
 
+    # Computed against the device's just-updated-but-not-yet-committed
+    # attributes above (last_checkin_at in particular) - compute_effective_state
+    # only reads plain Python attributes, so this doesn't need a DB round trip.
     eff = compute_effective_state(device, customer, now)
     logger.info("Check-in: device=%s status=%s code=%s", device.id, eff.status, eff.failure_code)
+
+    # A device that's confirmed back in good standing gets its own
+    # self-service grace budget (Settings -> "Grant Grace Period") restored
+    # to the full SELF_GRACE_USES - otherwise a device that burned through
+    # its budget during one billing hiccup would stay stuck at a reduced
+    # count forever, even long after that's resolved, until an operator
+    # happened to notice and click "Reset uses" on the dashboard. Only
+    # writes when there's actually something to top up, so a device that's
+    # been active the whole time doesn't get a no-op DB write every
+    # check-in.
+    if eff.status == "active" and device.self_grace_uses_remaining < SELF_GRACE_USES:
+        logger.info(
+            "Check-in: device=%s back in good standing - restoring self-grace uses %d -> %d",
+            device.id,
+            device.self_grace_uses_remaining,
+            SELF_GRACE_USES,
+        )
+        device.self_grace_uses_remaining = SELF_GRACE_USES
+
+    db.add(device)
+    db.commit()
+    db.refresh(device)
 
     # Computed fresh on every check-in rather than stored anywhere, same as
     # eff.status above: an update is "pending" for exactly as long as
