@@ -4,6 +4,16 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 
+class WifiApIn(BaseModel):
+    """One nearby Wi-Fi access point seen during a device's scan (see
+    CheckinRequest.wifi_aps below) - mirrors the shape Google's
+    Geolocation API expects for a wifiAccessPoints entry."""
+
+    mac: str
+    rssi: int
+    channel: Optional[int] = None
+
+
 class CheckinRequest(BaseModel):
     firmware_version: Optional[str] = None
     battery_pct: Optional[float] = None
@@ -33,6 +43,14 @@ class CheckinRequest(BaseModel):
     # for its own name on every check-in - see the note on the rename
     # endpoint below about the resulting two-sided-edit conflict.
     name: Optional[str] = None
+    # Nearby Wi-Fi access points from a scan, sent only on the one check-in
+    # following a response that set request_wifi_scan=true (see
+    # CheckinResponse below) - never on a schedule, since a physically-
+    # installed table tent's location doesn't change. An empty list (device
+    # scanned but saw nothing) is treated differently from an omitted field
+    # (device hasn't scanned yet, or is on firmware too old to) - see
+    # checkin()'s handling of this in main.py.
+    wifi_aps: Optional[List[WifiApIn]] = None
 
 
 class CheckinResponse(BaseModel):
@@ -55,6 +73,12 @@ class CheckinResponse(BaseModel):
     # normal check-in with no pending update just gets false/None.
     firmware_update_available: bool = False
     firmware_update_version: Optional[str] = None
+    # True for exactly one check-in response after an admin clicks "Locate"
+    # on the dashboard (see Device.location_requested) - tells the firmware
+    # to scan nearby Wi-Fi access points and send them on its next check-in
+    # (see CheckinRequest.wifi_aps above). Defaults false so a normal
+    # check-in with no pending location request just gets false.
+    request_wifi_scan: bool = False
 
 
 class CustomerCreate(BaseModel):
@@ -106,6 +130,17 @@ class DeviceOut(BaseModel):
     # None means no update is pending. Lets the dashboard show a "pending"
     # note on a device row until it's actually flashed and rebooted.
     target_firmware_version: Optional[str] = None
+    # Wi-Fi based geolocation - see Device.location_* in models.py. All
+    # None until a "Locate" request has actually resolved once.
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    location_accuracy_m: Optional[float] = None
+    location_address: Optional[str] = None
+    location_updated_at: Optional[datetime] = None
+    # True while a "Locate" request is waiting on the device's next one or
+    # two check-ins to actually produce a scan - lets the dashboard show a
+    # "Locating…" note instead of just a stale/blank location.
+    location_requested: bool = False
 
 
 class DeviceListOut(BaseModel):

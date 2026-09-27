@@ -3,7 +3,7 @@ import string
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary, String
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import relationship
 
 from .database import Base
@@ -93,6 +93,33 @@ class Device(Base):
     # clears itself - same computed-not-stored pattern already used for
     # manually_suspended/effective_status, no separate "mark complete" step.
     target_firmware_version = Column(String, nullable=True)
+
+    # Wi-Fi based geolocation. Populated by resolving the device's most
+    # recent nearby-Wi-Fi scan (see CheckinRequest.wifi_aps in schemas.py)
+    # through Google's Geolocation API for a lat/lng + accuracy radius,
+    # then reverse-geocoding that through Google's Geocoding API for a
+    # human-readable address - see resolve_wifi_location() in main.py. All
+    # nullable: a device that's never been asked to locate itself, or whose
+    # most recent attempt failed (no API key configured, no network match
+    # found), just has none of this set and the dashboard shows "-" same as
+    # any other not-yet-known field.
+    location_lat = Column(Float, nullable=True)
+    location_lng = Column(Float, nullable=True)
+    location_accuracy_m = Column(Float, nullable=True)
+    location_address = Column(String, nullable=True)
+    location_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # Set by POST /api/v1/admin/devices/{id}/request-location (the
+    # dashboard's "Locate" button). Tells the device, on its *next*
+    # check-in response, to scan nearby Wi-Fi access points and include
+    # them on the check-in right after that (see
+    # CheckinResponse.request_wifi_scan and checkin()'s handling of
+    # body.wifi_aps) - cleared automatically once that follow-up check-in
+    # comes in, whether or not the location resolve itself succeeded.
+    # Physically-installed table tents don't move, so this is on-demand
+    # rather than something every device does on every 20-minute check-in -
+    # no reason to burn Google Geolocation API quota on a location that
+    # isn't going to have changed.
+    location_requested = Column(Boolean, nullable=False, default=False)
 
     created_at = Column(DateTime(timezone=True), default=now_utc)
 

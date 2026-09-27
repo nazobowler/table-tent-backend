@@ -22,3 +22,9 @@ python-dotenv>=1.0
 # SQLAlchemy driver outage: an implicit dependency that worked locally by
 # accident.
 python-multipart>=0.0.9
+# Used to call Google's Geolocation/Geocoding APIs for Wi-Fi based device
+# location (see resolve_wifi_location() in app/main.py). Not pulled in
+# transitively by anything else here - stripe's SDK bundles its own HTTP
+# client internals, so don't rely on that by accident (same class of gap
+# as the python-multipart outage above).
+requests>=2.31

@@ -124,6 +124,7 @@ extra to configure for the app itself - just the environment variables.
    | `STRIPE_WEBHOOK_SECRET` | `whsec_placeholder` for now |
    | `OFFLINE_CAP_HOURS` | `24` |
    | `GRACE_HOURS` | `24` |
+   | `GOOGLE_MAPS_API_KEY` | Optional - powers the dashboard's "Locate" button (Wi-Fi based device location). A Google Cloud API key with both the **Geolocation API** and **Geocoding API** enabled (console.cloud.google.com > APIs & Services > Library to enable them, then Credentials to create a key - restrict it to just those two APIs). Leave unset and Locate requests just never resolve; nothing else depends on it. |
 
    Leave `DATABASE_URL` unset - it defaults to a local SQLite file inside
    the container. That's fine to start, with one caveat: Railway's

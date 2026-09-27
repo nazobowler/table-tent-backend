@@ -311,7 +311,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
         '<div class="muted-note">As of last check-in (' + fmtRelative(cached.as_of) + ') - not live, updates on the device\\'s next hourly check-in.</div>';
     }
     return '<tr class="log-row" data-log-row="' + escapeHtml(d.device_id) + '">' +
-      '<td colspan="8" style="background:#0d0f13;">' +
+      '<td colspan="9" style="background:#0d0f13;">' +
       '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">' +
       '<strong style="font-size:12px; color:var(--text-dim);">Log — ' + escapeHtml(d.name) + '</strong>' +
       '<div class="row-actions">' +
@@ -334,7 +334,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
     });
     var html = '<table><thead><tr>' +
       '<th>Device</th><th>Customer</th><th>Status</th><th>Last check-in</th>' +
-      '<th>Firmware</th><th>WiFi</th><th>Grace expires</th><th></th>' +
+      '<th>Firmware</th><th>WiFi</th><th>Location</th><th>Grace expires</th><th></th>' +
       '</tr></thead><tbody>';
     rows.forEach(function (d) {
       html += '<tr>' +
@@ -365,6 +365,19 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             ? '<div><a href="http://' + escapeHtml(d.local_ip) + '" target="_blank" rel="noopener" title="Opens the device\\'s own local page - only reachable from the same WiFi network as the device.">' + escapeHtml(d.local_ip) + '</a></div>'
             : '') +
         '</td>' +
+        '<td class="dim">' +
+          (d.location_address
+            ? escapeHtml(d.location_address)
+            : (d.location_lat != null
+                ? d.location_lat.toFixed(5) + ', ' + d.location_lng.toFixed(5)
+                : '—')) +
+          (d.location_updated_at
+            ? '<div class="muted-note">as of ' + fmtRelative(d.location_updated_at) + '</div>'
+            : '') +
+          (d.location_requested
+            ? '<div class="muted-note">Locating… (next check-in\\'s)</div>'
+            : '') +
+        '</td>' +
         '<td class="dim">' + (d.grace_expires_at ? fmtRelative(d.grace_expires_at) : "—") + '</td>' +
         '<td><div class="row-actions">' +
           (state.confirmDelete[d.device_id]
@@ -384,6 +397,11 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
                 (d.manually_suspended ? "Reactivate" : "Suspend") +
               '</button>' +
               '<button data-action="reset-grace" data-device="' + escapeHtml(d.device_id) + '">Reset grace</button>' +
+              '<button data-action="locate" data-device="' + escapeHtml(d.device_id) + '"' +
+                (d.location_requested ? ' disabled' : '') +
+                ' title="Asks the device to scan nearby Wi-Fi networks on its next check-in and resolve them to a location - takes one or two check-in cycles, not instant.">' +
+                (d.location_requested ? "Locating…" : (d.location_address || d.location_lat != null ? "Re-locate" : "Locate")) +
+              '</button>' +
               '<button data-action="toggle-log" data-device="' + escapeHtml(d.device_id) + '">' +
                 (state.expandedLogs[d.device_id] ? "Hide log" : "Log") +
               '</button>' +
@@ -415,6 +433,19 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
           .then(function () { return loadAll(); })
           .catch(function (e) { showBanner("error", "Action failed: " + escapeHtml(e.message)); })
           .then(function () { btn.disabled = false; });
+      });
+    });
+
+    wrap.querySelectorAll('button[data-action="locate"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var deviceId = btn.getAttribute("data-device");
+        btn.disabled = true;
+        apiFetch("/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/request-location", { method: "POST" })
+          .then(function () {
+            showBanner("success", "Location requested - it'll show up here within a check-in or two.");
+            return loadAll();
+          })
+          .catch(function (e) { showBanner("error", "Couldn't request location: " + escapeHtml(e.message)); btn.disabled = false; });
       });
     });
 

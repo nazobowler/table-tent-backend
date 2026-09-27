@@ -2,8 +2,9 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
+import requests
 import stripe
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
@@ -45,6 +46,18 @@ def _ensure_device_columns():
         statements.append("ALTER TABLE devices ADD COLUMN target_firmware_version TEXT")
     if "local_ip" not in existing:
         statements.append("ALTER TABLE devices ADD COLUMN local_ip TEXT")
+    if "location_lat" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN location_lat DOUBLE PRECISION")
+    if "location_lng" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN location_lng DOUBLE PRECISION")
+    if "location_accuracy_m" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN location_accuracy_m DOUBLE PRECISION")
+    if "location_address" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN location_address TEXT")
+    if "location_updated_at" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN location_updated_at TIMESTAMP WITH TIME ZONE")
+    if "location_requested" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN location_requested BOOLEAN NOT NULL DEFAULT false")
     if not statements:
         return
     with engine.begin() as conn:
@@ -80,6 +93,90 @@ Base.metadata.create_all(bind=engine)
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_placeholder")
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "sk_placeholder")
+
+# A Google Cloud API key with both the "Geolocation API" and "Geocoding
+# API" enabled (console.cloud.google.com -> APIs & Services -> Library,
+# then Credentials to create/restrict a key to just those two APIs) - see
+# resolve_wifi_location() below. Left unset, "Locate" requests just log a
+# warning and never resolve; nothing else about the backend depends on it.
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+
+def resolve_wifi_location(wifi_aps: list) -> Optional[dict]:
+    """Resolves a list of nearby Wi-Fi access points (see
+    schemas.WifiApIn / the firmware's Wi-Fi scan, one entry per dict with
+    mac/rssi/channel keys) into an approximate physical location, by
+    chaining two Google Maps Platform APIs: Geolocation (a Wi-Fi
+    fingerprint -> lat/lng + an accuracy radius in meters) and then
+    Geocoding (that lat/lng -> a human-readable street address). Returns
+    None on ANY failure - no API key configured, a network error, no
+    match found for these access points in Google's database - rather
+    than raising. A location lookup is a nice-to-have; a device's
+    check-in must never fail because of it, and the caller logs why."""
+    if not GOOGLE_MAPS_API_KEY:
+        logger.warning("Location: GOOGLE_MAPS_API_KEY not set - skipping resolve")
+        return None
+    if not wifi_aps:
+        return None
+
+    try:
+        geo_resp = requests.post(
+            f"https://www.googleapis.com/geolocation/v1/geolocate?key={GOOGLE_MAPS_API_KEY}",
+            json={
+                "considerIp": False,
+                "wifiAccessPoints": [
+                    {
+                        "macAddress": ap["mac"],
+                        "signalStrength": ap["rssi"],
+                        **({"channel": ap["channel"]} if ap.get("channel") else {}),
+                    }
+                    for ap in wifi_aps
+                ],
+            },
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        logger.warning("Location: Geolocation API request failed: %s", e)
+        return None
+
+    if geo_resp.status_code != 200:
+        logger.warning(
+            "Location: Geolocation API returned HTTP %d - %s",
+            geo_resp.status_code,
+            geo_resp.text[:300],
+        )
+        return None
+
+    try:
+        geo_data = geo_resp.json()
+        lat = geo_data["location"]["lat"]
+        lng = geo_data["location"]["lng"]
+        accuracy = geo_data.get("accuracy")
+    except (KeyError, ValueError) as e:
+        logger.warning("Location: Geolocation API returned an unexpected shape: %s", e)
+        return None
+
+    # Reverse-geocode to a street address. Best-effort: if this leg fails,
+    # still return the coordinates - a lat/lng with no address is still
+    # useful on the dashboard (a map link, say), just less readable.
+    address = None
+    try:
+        rev_resp = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"latlng": f"{lat},{lng}", "key": GOOGLE_MAPS_API_KEY},
+            timeout=10,
+        )
+        if rev_resp.status_code == 200:
+            results = (rev_resp.json() or {}).get("results") or []
+            if results:
+                address = results[0].get("formatted_address")
+        else:
+            logger.warning("Location: Geocoding API returned HTTP %d", rev_resp.status_code)
+    except requests.RequestException as e:
+        logger.warning("Location: Geocoding API request failed: %s", e)
+
+    return {"lat": lat, "lng": lng, "accuracy": accuracy, "address": address}
+
 
 # How long an unclaimed pairing code stays valid. Short on purpose - it's
 # only alive for the few minutes between a device booting unprovisioned and
@@ -159,6 +256,40 @@ def checkin(
         # device_locally_suspended.
         device.name = body.name.strip()[:100]
 
+    # A Wi-Fi scan the device took because a previous check-in's response
+    # told it to (see request_wifi_scan below and Device.location_requested).
+    # Distinguishes "field present" from "field omitted": an omitted
+    # wifi_aps means this device hasn't scanned yet (or is on firmware too
+    # old to) and location_requested should stay set so the *next* response
+    # still asks for one; a present-but-empty list means it scanned and
+    # genuinely saw nothing (dead zone, or Wi-Fi scanning disabled), which
+    # still counts as "attempted" so this doesn't retry forever on its own -
+    # an admin can just click Locate again.
+    if body.wifi_aps is not None:
+        aps = [{"mac": ap.mac, "rssi": ap.rssi, "channel": ap.channel} for ap in body.wifi_aps]
+        if aps:
+            location = resolve_wifi_location(aps)
+            if location:
+                device.location_lat = location["lat"]
+                device.location_lng = location["lng"]
+                device.location_accuracy_m = location.get("accuracy")
+                device.location_address = location.get("address")
+                device.location_updated_at = now
+                logger.info(
+                    "Location: resolved device=%s (%s)",
+                    device.id,
+                    location.get("address") or f"{location['lat']},{location['lng']}",
+                )
+            else:
+                logger.warning(
+                    "Location: could not resolve device=%s from %d access point(s)",
+                    device.id,
+                    len(aps),
+                )
+        else:
+            logger.info("Location: device=%s scanned but saw no nearby access points", device.id)
+        device.location_requested = False
+
     db.add(device)
     db.commit()
     db.refresh(device)
@@ -190,6 +321,12 @@ def checkin(
         name=device.name,
         firmware_update_available=fw_update_available,
         firmware_update_version=device.target_firmware_version if fw_update_available else None,
+        # See the body.wifi_aps handling above - device.location_requested
+        # only stays true here if this check-in did NOT just include a scan
+        # (either it's the first response after a Locate click, or an older
+        # firmware that will never act on this flag at all - harmless
+        # either way, it just sits there until Locate is clicked again).
+        request_wifi_scan=device.location_requested,
     )
 
 
@@ -472,6 +609,12 @@ def _device_to_out(device: models.Device, db: Session) -> schemas.DeviceOut:
         slide_sync_status=device.slide_sync_status,
         slide_synced_at=device.slide_synced_at,
         target_firmware_version=device.target_firmware_version,
+        location_lat=device.location_lat,
+        location_lng=device.location_lng,
+        location_accuracy_m=device.location_accuracy_m,
+        location_address=device.location_address,
+        location_updated_at=device.location_updated_at,
+        location_requested=device.location_requested,
     )
 
 
@@ -695,6 +838,32 @@ def push_firmware(device_id: str, body: schemas.FirmwarePushIn, db: Session = De
     db.commit()
     db.refresh(device)
     logger.info("Firmware: pushed version=%s to device=%s", version, device_id)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/request-location",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def request_location(device_id: str, db: Session = Depends(get_db)):
+    """Doesn't locate the device directly - same reasoning as push_firmware
+    above, there's no way to reach a device that isn't already asking the
+    backend something. Just flags that a Wi-Fi scan is wanted; the
+    device's *next* check-in response tells it to scan (see
+    CheckinResponse.request_wifi_scan) and the check-in AFTER THAT actually
+    carries the scan results and resolves them (see checkin()'s handling of
+    body.wifi_aps) - so a location typically shows up within one or two
+    check-in cycles, not instantly. A device on older firmware that
+    doesn't understand request_wifi_scan simply never scans, and this flag
+    just sits there harmlessly (still shown as "Locating..." on the
+    dashboard) until the device is reflashed or Locate is clicked again."""
+    device = _get_device_or_404(device_id, db)
+    device.location_requested = True
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    logger.info("Location: requested for device=%s", device_id)
     return _device_to_out(device, db)
 
 
