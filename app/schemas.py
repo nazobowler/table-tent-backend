@@ -141,6 +141,27 @@ class DeviceOut(BaseModel):
     # two check-ins to actually produce a scan - lets the dashboard show a
     # "Locating…" note instead of just a stale/blank location.
     location_requested: bool = False
+    # Set while an operator's "Grant grace" override is active - see
+    # Device.manual_grace_until in models.py. The dashboard uses this (rather
+    # than just effective_status == "grace") to tell a manual override apart
+    # from an ordinary payment-failure grace window, since both render the
+    # same Grace badge/countdown otherwise.
+    manual_grace_until: Optional[datetime] = None
+    # Remaining budget for the device's own self-service "Grant Grace
+    # Period" Settings menu item - see Device.self_grace_uses_remaining in
+    # models.py. Shown on the dashboard so an operator can see when a
+    # device is running low and reset it if needed.
+    self_grace_uses_remaining: int
+
+
+class DeviceGraceRequestOut(BaseModel):
+    """Response to the device's own POST /api/v1/devices/{id}/request-grace -
+    deliberately separate from DeviceOut (which is admin-only) since this is
+    device-facing and only needs enough for the on-device confirmation
+    screen to say something accurate."""
+    granted: bool
+    uses_remaining: int
+    grace_until: Optional[datetime] = None
 
 
 class DeviceListOut(BaseModel):

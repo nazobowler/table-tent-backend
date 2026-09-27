@@ -7,6 +7,7 @@ from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, La
 from sqlalchemy.orm import relationship
 
 from .database import Base
+from .state import SELF_GRACE_USES
 
 
 def now_utc():
@@ -120,6 +121,30 @@ class Device(Base):
     # no reason to burn Google Geolocation API quota on a location that
     # isn't going to have changed.
     location_requested = Column(Boolean, nullable=False, default=False)
+
+    # Operator "give this device more time, whatever the actual cause" override
+    # - set by POST /api/v1/admin/devices/{id}/grant-grace (the dashboard's
+    # "Grant grace" button). While this is set and in the future,
+    # compute_effective_state() in state.py returns "grace" unconditionally,
+    # ahead of the offline cap / canceled-subscription / payment-failure
+    # checks - so it covers a device about to (or already) show the on-device
+    # "Back soon" screen for ANY reason (dead Wi-Fi during a router swap,
+    # Stripe webhook lagging behind a fixed card, device being relocated,
+    # etc.), without the operator needing to first work out which of those it
+    # actually is. Nullable/unset by default; doesn't touch last_checkin_at
+    # or grace_started_at, so once it lapses the real underlying state (again,
+    # whatever it is) just resumes as if this had never been set.
+    manual_grace_until = Column(DateTime(timezone=True), nullable=True)
+
+    # Self-service budget for the device's OWN "Grant Grace Period" Settings
+    # menu item (as opposed to the admin dashboard's "Grant grace" button,
+    # which isn't limited) - see SELF_GRACE_USES in state.py and
+    # POST /api/v1/devices/{id}/request-grace in main.py. Decrements by one
+    # on each successful self-triggered grant; once it hits 0 the device's
+    # own request just fails with "ask your operator" rather than granting
+    # forever. Doesn't refill automatically - an operator tops it back up
+    # from the dashboard (Reset uses) if a venue legitimately needs more.
+    self_grace_uses_remaining = Column(Integer, nullable=False, default=SELF_GRACE_USES)
 
     created_at = Column(DateTime(timezone=True), default=now_utc)
 

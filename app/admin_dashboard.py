@@ -337,6 +337,7 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
       '<th>Firmware</th><th>WiFi</th><th>Location</th><th>Grace expires</th><th></th>' +
       '</tr></thead><tbody>';
     rows.forEach(function (d) {
+      var manualGraceActive = !!(d.manual_grace_until && new Date(d.manual_grace_until) > new Date());
       html += '<tr>' +
         '<td>' +
           (state.renaming[d.device_id]
@@ -378,7 +379,10 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             ? '<div class="muted-note">Locating… (next check-in\\'s)</div>'
             : '') +
         '</td>' +
-        '<td class="dim">' + (d.grace_expires_at ? fmtRelative(d.grace_expires_at) : "—") + '</td>' +
+        '<td class="dim">' + (d.grace_expires_at ? fmtRelative(d.grace_expires_at) : "—") +
+          (manualGraceActive ? '<div class="muted-note">manual override</div>' : '') +
+          '<div class="muted-note">device self-uses: ' + d.self_grace_uses_remaining + '</div>' +
+        '</td>' +
         '<td><div class="row-actions">' +
           (state.confirmDelete[d.device_id]
             ? '<span class="dim" style="font-size:12px;">Delete forever?</span>' +
@@ -397,6 +401,13 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
                 (d.manually_suspended ? "Reactivate" : "Suspend") +
               '</button>' +
               '<button data-action="reset-grace" data-device="' + escapeHtml(d.device_id) + '">Reset grace</button>' +
+              '<button data-action="' + (manualGraceActive ? "clear-grace-override" : "grant-grace") + '" data-device="' + escapeHtml(d.device_id) + '"' +
+                ' title="Keeps this device showing as active/grace for a while (same window as Reset grace) no matter what the actual cause is - offline, payment failed, canceled - for when it just needs to stay up and you don\\'t need to figure out why first. Click again any time to restart the window.">' +
+                (manualGraceActive ? "Clear override" : "Grant grace") +
+              '</button>' +
+              (d.self_grace_uses_remaining < 1
+                ? '<button data-action="reset-self-grace-uses" data-device="' + escapeHtml(d.device_id) + '" title="Tops the device\\'s own Settings-menu grace requests back up - it\\'s used up all of them.">Reset uses</button>'
+                : '') +
               '<button data-action="locate" data-device="' + escapeHtml(d.device_id) + '"' +
                 (d.location_requested ? ' disabled' : '') +
                 ' title="Asks the device to scan nearby Wi-Fi networks on its next check-in and resolve them to a location - takes one or two check-in cycles, not instant.">' +
@@ -422,12 +433,19 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
     html += '</tbody></table>';
     wrap.innerHTML = html;
 
-    wrap.querySelectorAll('button[data-action="suspend"], button[data-action="reactivate"], button[data-action="reset-grace"]').forEach(function (btn) {
+    wrap.querySelectorAll('button[data-action="suspend"], button[data-action="reactivate"], button[data-action="reset-grace"], button[data-action="grant-grace"], button[data-action="clear-grace-override"], button[data-action="reset-self-grace-uses"]').forEach(function (btn) {
       btn.addEventListener("click", function () {
         var action = btn.getAttribute("data-action");
         var deviceId = btn.getAttribute("data-device");
-        var path = "/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/" +
-          (action === "suspend" ? "force-suspend" : action === "reactivate" ? "force-reactivate" : "reset-grace");
+        var endpoints = {
+          suspend: "force-suspend",
+          reactivate: "force-reactivate",
+          "reset-grace": "reset-grace",
+          "grant-grace": "grant-grace",
+          "clear-grace-override": "clear-grace-override",
+          "reset-self-grace-uses": "reset-self-grace-uses",
+        };
+        var path = "/api/v1/admin/devices/" + encodeURIComponent(deviceId) + "/" + endpoints[action];
         btn.disabled = true;
         apiFetch(path, { method: "POST" })
           .then(function () { return loadAll(); })

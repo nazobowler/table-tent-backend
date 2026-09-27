@@ -7,6 +7,17 @@ from datetime import datetime, timedelta, timezone
 OFFLINE_CAP_HOURS = float(os.getenv("OFFLINE_CAP_HOURS", "24"))
 GRACE_HOURS = float(os.getenv("GRACE_HOURS", "24"))
 
+# How many times a device can grant itself a grace override from its own
+# Settings menu (see Device.self_grace_uses_remaining in models.py and
+# POST /api/v1/devices/{id}/request-grace in main.py) before it needs an
+# operator to top the count back up from the dashboard. A budget, not a
+# cooldown - each use costs one, whatever the underlying cause - so a venue
+# can't just keep clicking it forever to dodge billing indefinitely, but
+# still has real, repeatable breathing room for actual bad luck (a flaky
+# router, a card that takes a day to get sorted) without having to reach
+# an admin every single time.
+SELF_GRACE_USES = int(os.getenv("SELF_GRACE_USES", "7"))
+
 
 def _aware(dt):
     """SQLite doesn't persist tzinfo even on DateTime(timezone=True) columns -
@@ -30,8 +41,8 @@ class EffectiveState:
 
 def compute_effective_state(device, customer, now=None) -> EffectiveState:
     """Effective state is computed on read, never stored - avoids needing a
-    cron job to sweep state. Priority order matches the design doc:
-    manual suspend -> offline cap -> canceled subscription (immediate) ->
+    cron job to sweep state. Priority order: manual suspend -> manual grace
+    override -> offline cap -> canceled subscription (immediate) ->
     payment-failure grace -> active."""
     now = now or datetime.now(timezone.utc)
 
@@ -47,7 +58,19 @@ def compute_effective_state(device, customer, now=None) -> EffectiveState:
     if device.manually_suspended or device.device_locally_suspended:
         return EffectiveState("failed", failure_code=423)
 
-    # 2. Offline cap - protects against a device being taken offline
+    # 2. Manual grace override - an operator-granted "keep this playing for
+    # now" window (see the comment on Device.manual_grace_until in
+    # models.py). Checked ahead of every cause below it can override - offline
+    # cap, canceled subscription, payment-failure grace - so a single button
+    # covers "Back soon" for any of those reasons without the operator first
+    # diagnosing which one it is. Deliberately does NOT override a manual
+    # suspend (step 1) - that's a deliberate "turn this off" decision, not a
+    # clock running out, so this override isn't meant to undo it.
+    manual_until = _aware(device.manual_grace_until)
+    if manual_until and now < manual_until:
+        return EffectiveState("grace", grace_expires_at=manual_until)
+
+    # 3. Offline cap - protects against a device being taken offline
     # indefinitely to dodge billing, while surviving ordinary WiFi/router
     # hiccups without interrupting the slideshow. Resets automatically
     # whenever last_checkin_at is updated (i.e. on every successful check-in),
@@ -56,12 +79,12 @@ def compute_effective_state(device, customer, now=None) -> EffectiveState:
     if last_checkin is None or (now - last_checkin) > timedelta(hours=OFFLINE_CAP_HOURS):
         return EffectiveState("failed", failure_code=504)
 
-    # 3. A canceled subscription is an immediate failure - a deliberate
+    # 4. A canceled subscription is an immediate failure - a deliberate
     # cancellation doesn't get the 24h courtesy window a declined card does.
     if customer.subscription_status == "canceled":
         return EffectiveState("failed", failure_code=402)
 
-    # 4. Payment failed - within the grace window the slideshow keeps
+    # 5. Payment failed - within the grace window the slideshow keeps
     # playing (this state is visible on the dashboard, invisible to the
     # venue/customer); past it, same 402 as a cancellation.
     if customer.subscription_status == "failed":
@@ -71,5 +94,5 @@ def compute_effective_state(device, customer, now=None) -> EffectiveState:
             return EffectiveState("failed", failure_code=402)
         return EffectiveState("grace", grace_expires_at=expires_at)
 
-    # 5. Nothing wrong.
+    # 6. Nothing wrong.
     return EffectiveState("active")

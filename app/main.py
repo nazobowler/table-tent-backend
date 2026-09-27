@@ -15,7 +15,7 @@ from . import models, schemas
 from .admin_dashboard import ADMIN_DASHBOARD_HTML
 from .auth import authenticate_device, hash_secret, require_admin
 from .database import Base, engine, get_db
-from .state import compute_effective_state, _aware
+from .state import compute_effective_state, _aware, GRACE_HOURS, SELF_GRACE_USES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("table-tent-backend")
@@ -58,6 +58,12 @@ def _ensure_device_columns():
         statements.append("ALTER TABLE devices ADD COLUMN location_updated_at TIMESTAMP WITH TIME ZONE")
     if "location_requested" not in existing:
         statements.append("ALTER TABLE devices ADD COLUMN location_requested BOOLEAN NOT NULL DEFAULT false")
+    if "manual_grace_until" not in existing:
+        statements.append("ALTER TABLE devices ADD COLUMN manual_grace_until TIMESTAMP WITH TIME ZONE")
+    if "self_grace_uses_remaining" not in existing:
+        statements.append(
+            f"ALTER TABLE devices ADD COLUMN self_grace_uses_remaining INTEGER NOT NULL DEFAULT {SELF_GRACE_USES}"
+        )
     if not statements:
         return
     with engine.begin() as conn:
@@ -615,6 +621,14 @@ def _device_to_out(device: models.Device, db: Session) -> schemas.DeviceOut:
         location_address=device.location_address,
         location_updated_at=device.location_updated_at,
         location_requested=device.location_requested,
+        # _aware(), not the raw column - see its docstring in state.py: SQLite
+        # hands back a naive datetime even for a DateTime(timezone=True)
+        # column, and serializing that naive value straight to JSON would
+        # give the dashboard's `new Date(...)` an unsuffixed string, which
+        # browsers parse as LOCAL time instead of UTC. eff.grace_expires_at
+        # already goes through this same helper inside compute_effective_state.
+        manual_grace_until=_aware(device.manual_grace_until),
+        self_grace_uses_remaining=device.self_grace_uses_remaining,
     )
 
 
@@ -682,6 +696,110 @@ def reset_grace(device_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(device)
     return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/grant-grace",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def grant_grace(device_id: str, db: Session = Depends(get_db)):
+    """The dashboard's 'Grant grace' button - see the comment on
+    Device.manual_grace_until in models.py and the step-2 check in
+    compute_effective_state(). Gives the device GRACE_HOURS (same knob as
+    the payment-failure grace window) of guaranteed non-Failed display,
+    covering the offline cap, a canceled subscription, or an expired
+    payment-failure grace all at once, without the operator needing to
+    know which one is actually the cause. Re-clickable - each call resets
+    the window to GRACE_HOURS from now, same "start the clock over" pattern
+    as reset_grace()."""
+    device = _get_device_or_404(device_id, db)
+    device.manual_grace_until = now_utc() + timedelta(hours=GRACE_HOURS)
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    logger.info("Manual grace override granted for device=%s until=%s", device_id, device.manual_grace_until)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/clear-grace-override",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def clear_grace_override(device_id: str, db: Session = Depends(get_db)):
+    """Undo side of grant_grace() - lets the operator end an override early
+    (e.g. clicked by mistake, or the real underlying issue is now confirmed
+    fixed some other way) instead of waiting out the rest of the window."""
+    device = _get_device_or_404(device_id, db)
+    device.manual_grace_until = None
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    logger.info("Manual grace override cleared for device=%s", device_id)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/admin/devices/{device_id}/reset-self-grace-uses",
+    response_model=schemas.DeviceOut,
+    dependencies=[Depends(require_admin)],
+)
+def reset_self_grace_uses(device_id: str, db: Session = Depends(get_db)):
+    """Tops a device's self-service grace budget (see
+    Device.self_grace_uses_remaining) back up to SELF_GRACE_USES - the
+    dashboard's 'Reset uses' button, for when a venue has a legitimate
+    reason to need more than the default allotment."""
+    device = _get_device_or_404(device_id, db)
+    device.self_grace_uses_remaining = SELF_GRACE_USES
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    logger.info("Self-service grace uses reset for device=%s", device_id)
+    return _device_to_out(device, db)
+
+
+@app.post(
+    "/api/v1/devices/{device_id}/request-grace",
+    response_model=schemas.DeviceGraceRequestOut,
+)
+def request_grace(
+    device_id: str,
+    device: models.Device = Depends(authenticate_device),
+    db: Session = Depends(get_db),
+):
+    """Device-facing counterpart to the admin's grant_grace() above - the
+    Settings menu's own 'Grant Grace Period' item. Authenticated the same
+    way as check-in (the device's own Bearer secret, not the admin key) so
+    a device can only ever grant grace to ITSELF, never any other device.
+    Spends one of self_grace_uses_remaining per successful grant rather
+    than being unlimited like the admin button - see SELF_GRACE_USES in
+    state.py for why. Doesn't touch last_checkin_at or anything else about
+    the device; purely sets manual_grace_until, same field the admin
+    button uses, so either source clears the same way (naturally expiring,
+    or an admin's Clear override)."""
+    if device.self_grace_uses_remaining <= 0:
+        logger.info("Self-service grace request denied (no uses left) for device=%s", device_id)
+        return schemas.DeviceGraceRequestOut(
+            granted=False,
+            uses_remaining=0,
+            grace_until=_aware(device.manual_grace_until),
+        )
+
+    device.self_grace_uses_remaining -= 1
+    device.manual_grace_until = now_utc() + timedelta(hours=GRACE_HOURS)
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    logger.info(
+        "Self-service grace granted for device=%s until=%s uses_remaining=%s",
+        device_id, device.manual_grace_until, device.self_grace_uses_remaining,
+    )
+    return schemas.DeviceGraceRequestOut(
+        granted=True,
+        uses_remaining=device.self_grace_uses_remaining,
+        grace_until=_aware(device.manual_grace_until),
+    )
 
 
 @app.post(
