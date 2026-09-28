@@ -19,6 +19,10 @@ class CheckinRequest(BaseModel):
     battery_pct: Optional[float] = None
     current_slide_id: Optional[str] = None
     wifi_rssi_dbm: Optional[int] = None
+    # The name (SSID) of the WiFi network the device is currently joined to
+    # (WiFi.SSID()). Optional so older firmware that doesn't send it yet
+    # doesn't fail validation.
+    wifi_ssid: Optional[str] = None
     # The device's own local IP on its current WiFi network (WiFi.localIP()),
     # so the admin dashboard can link to the device's own on-device web page.
     # Optional so older firmware that doesn't send it yet doesn't fail
@@ -121,6 +125,7 @@ class DeviceOut(BaseModel):
     device_locally_suspended: bool
     firmware_version: Optional[str] = None
     wifi_rssi_dbm: Optional[int] = None
+    wifi_ssid: Optional[str] = None
     local_ip: Optional[str] = None
     last_reboot_at: Optional[datetime] = None
     slide_sync_status: Optional[str] = None

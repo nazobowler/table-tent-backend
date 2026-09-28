@@ -361,7 +361,9 @@ ADMIN_DASHBOARD_HTML = """<!doctype html>
             ? '<div class="muted-note">&rarr; ' + escapeHtml(d.target_firmware_version) + ' pending</div>'
             : '') +
         '</td>' +
-        '<td class="dim">' + (d.wifi_rssi_dbm != null ? d.wifi_rssi_dbm + " dBm" : "—") +
+        '<td class="dim">' +
+          (d.wifi_ssid ? '<div>' + escapeHtml(d.wifi_ssid) + '</div>' : '') +
+          (d.wifi_rssi_dbm != null ? d.wifi_rssi_dbm + " dBm" : (d.wifi_ssid ? '' : "—")) +
           (d.local_ip
             ? '<div><a href="http://' + escapeHtml(d.local_ip) + '" target="_blank" rel="noopener" title="Opens the device\\'s own local page - only reachable from the same WiFi network as the device.">' + escapeHtml(d.local_ip) + '</a></div>'
             : '') +

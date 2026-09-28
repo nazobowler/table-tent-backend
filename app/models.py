@@ -63,6 +63,14 @@ class Device(Base):
     # Diagnostics, all optional - reported by the device's check-in payload.
     firmware_version = Column(String, nullable=True)
     wifi_rssi_dbm = Column(Integer, nullable=True)
+    # The name (SSID) of the WiFi network the device is currently joined to,
+    # reported on every check-in (WiFi.SSID() in the firmware). Shown on the
+    # dashboard next to the signal-strength reading so Kyle can tell at a
+    # glance which network a device is on - handy when a venue has more than
+    # one AP/SSID, or when confirming a device actually moved onto a new
+    # network after a WiFi reset. Just a label; nothing here authenticates or
+    # otherwise depends on it.
+    wifi_ssid = Column(String, nullable=True)
     # The device's own local IP on whatever WiFi network it's joined
     # (WiFi.localIP() in the firmware), reported on every check-in. Lets the
     # dashboard link straight to a device's own on-device web page (its
